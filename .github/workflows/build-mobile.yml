@@ -1,0 +1,110 @@
+name: Build iOS
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      ios_export:
+        description: "iOS output type"
+        required: true
+        default: "ipa"
+        type: choice
+        options:
+          - ipa
+          - simulator-app
+
+jobs:
+  ios:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+
+    env:
+      IOS_SCHEME: LiquidPlayeriOS
+      IOS_PROJECT: ios/LiquidPlayeriOS.xcodeproj
+      IOS_BUNDLE_ID: com.bobjoerules.liquidplayer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate --spec project.yml
+
+      - name: Build simulator app
+        if: ${{ inputs.ios_export == 'simulator-app' }}
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$IOS_PROJECT" \
+            -scheme "$IOS_SCHEME" \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee "$RUNNER_TEMP/xcodebuild-ios.log"
+
+      - name: Build unsigned device app
+        if: ${{ inputs.ios_export == 'ipa' }}
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$IOS_PROJECT" \
+            -scheme "$IOS_SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee "$RUNNER_TEMP/xcodebuild-ios.log"
+
+      - name: Package simulator app
+        if: ${{ inputs.ios_export == 'simulator-app' }}
+        run: |
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -path "*Build/Products/Release-iphonesimulator/Liquid Player.app" -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "Simulator .app not found."
+            exit 1
+          fi
+          mkdir -p artifacts
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" artifacts/liquid-player-ios-simulator-app.zip
+
+      - name: Package unsigned IPA
+        if: ${{ inputs.ios_export == 'ipa' }}
+        run: |
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -path "*Build/Products/Release-iphoneos/Liquid Player.app" -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "Device .app not found."
+            exit 1
+          fi
+          mkdir -p artifacts/Payload
+          cp -R "$APP_PATH" artifacts/Payload/
+          cd artifacts
+          zip -r liquid-player.ipa Payload
+
+      - name: Upload IPA artifact
+        if: ${{ inputs.ios_export == 'ipa' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: liquid-player-ipa
+          path: artifacts/liquid-player.ipa
+
+      - name: Upload simulator app
+        if: ${{ inputs.ios_export == 'simulator-app' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: liquid-player-ios-simulator-app
+          path: artifacts/liquid-player-ios-simulator-app.zip
+
+      - name: Upload iOS build log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-log
+          path: ${{ runner.temp }}/xcodebuild-ios.log

@@ -1,0 +1,58 @@
+name: LiquidPlayeriOS
+options:
+  minimumXcodeGenVersion: 2.38.0
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    PRODUCT_NAME: Liquid Player
+    PRODUCT_BUNDLE_IDENTIFIER: com.bobjoerules.liquidplayer
+    MARKETING_VERSION: 1.0
+    CURRENT_PROJECT_VERSION: 1
+    SWIFT_VERSION: 5.10
+    IPHONEOS_DEPLOYMENT_TARGET: 17.0
+    TARGETED_DEVICE_FAMILY: "1,2,6"
+    SUPPORTS_MACCATALYST: YES
+    DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  LiquidPlayeriOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: LiquidPlayeriOS/Sources
+      - path: LiquidPlayeriOS/Resources
+        buildPhase: resources
+    info:
+      path: LiquidPlayeriOS/Info.plist
+      properties:
+        UIBackgroundModes:
+          - audio
+        CFBundleURLTypes:
+          - CFBundleURLName: com.bobjoerules.liquidplayer
+            CFBundleURLSchemes:
+              - liquidplayer
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Liquid Player
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.music
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIFileSharingEnabled: YES
+        INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone:
+          - UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ASSETCATALOG_COMPILER_APPICON_NAME: LiquidPlayer
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_ASSET_PATHS: "\"LiquidPlayeriOS/Resources\""
+    scheme:
+      testTargets: []

@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Xcode / iOS / macOS
+build/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.ipa
+ios/LiquidPlayeriOS/Info.plist
+
+# Secrets & Environment
+*Secrets.xcconfig
+*Secrets.plist
+*.env
+*.env.local
+
+# IDE & Tooling
+.idea/
+.vscode/
+.agents/
+build_output.log
