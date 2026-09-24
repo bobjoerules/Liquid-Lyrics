@@ -271,7 +271,11 @@ final class PlayerViewModel: ObservableObject {
             self.lyricsAttribution = parsed.attribution
             self.lyricsSongwriters = parsed.songwriters
             self.authorMetadata = nowPlayingArtist
-            LibraryManager.shared.saveLyrics(for: trackId, parsed: parsed)
+            if parsed.lines.isEmpty {
+                LibraryManager.shared.markNoLyrics(for: trackId)
+            } else {
+                LibraryManager.shared.saveLyrics(for: trackId, parsed: parsed)
+            }
         } catch {
             self.isLoadingLyrics = false
             self.lyricsStatus = ""
@@ -280,6 +284,7 @@ final class PlayerViewModel: ObservableObject {
             self.lyricsAttribution = nil
             self.lyricsSongwriters = []
             self.authorMetadata = nowPlayingArtist
+            LibraryManager.shared.markNoLyrics(for: trackId)
         }
     }
 
@@ -649,7 +654,7 @@ final class LibraryManager: ObservableObject {
 
     // Songs in the last 30 days whose TTML is missing or older than 30 days (needs update)
     var songsNeedingTTMLUpdate: [LibrarySong] {
-        songsPlayedInLast30Days.filter { $0.isTTMLExpired || !$0.hasTTML }
+        songsPlayedInLast30Days.filter { $0.needsUpdate }
     }
 
     // MARK: - Record Playback
@@ -695,7 +700,9 @@ final class LibraryManager: ObservableObject {
                 lastPlayedAt: now,
                 ttmlContent: fileContent,
                 ttmlSavedAt: fileSavedAt,
-                lyricsSource: nil
+                lyricsSource: nil,
+                hasNoLyrics: nil,
+                lastCheckedForLyricsAt: fileSavedAt
             )
             songs.insert(newSong, at: 0)
         }
@@ -728,8 +735,22 @@ final class LibraryManager: ObservableObject {
             songs[index].ttmlContent = ttml
             songs[index].ttmlSavedAt = now
             songs[index].lyricsSource = source
+            songs[index].hasNoLyrics = false
+            songs[index].lastCheckedForLyricsAt = now
         }
         saveSongs()
+    }
+
+    func markNoLyrics(for trackId: String) {
+        let cleanId = trackId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else { return }
+
+        let now = Date()
+        if let index = songs.firstIndex(where: { $0.id == cleanId }) {
+            songs[index].hasNoLyrics = true
+            songs[index].lastCheckedForLyricsAt = now
+            saveSongs()
+        }
     }
 
     func saveLyrics(for trackId: String, parsed: ParsedLyrics, track: SpotifyTrackItem? = nil) {
@@ -769,11 +790,16 @@ final class LibraryManager: ObservableObject {
 
         do {
             let parsed = try await SpicyLyricsService.shared.fetchLyrics(for: cleanId)
+            if parsed.lines.isEmpty {
+                markNoLyrics(for: cleanId)
+                return true
+            }
             let song = songs.first(where: { $0.id == cleanId })
             let ttml = TTMLExporter.export(parsed: parsed, title: song?.name, artist: song?.artistNames)
             saveTTML(for: cleanId, ttml: ttml, source: parsed.source)
             return true
         } catch {
+            markNoLyrics(for: cleanId)
             return false
         }
     }

@@ -247,8 +247,8 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom) {
             if viewModel.selectedTrackID != nil {
                 miniPlayerBar
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 6)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
             }
         }
     }
@@ -302,7 +302,7 @@ struct ContentView: View {
                             Text("\(libraryManager.songsNeedingTTMLUpdate.count) songs have outdated lyrics")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(.white)
-                            Text("Played over 30 days ago")
+                            Text("Saved over 30 days ago")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.white.opacity(0.55))
                         }
@@ -414,8 +414,8 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom) {
             if viewModel.selectedTrackID != nil {
                 miniPlayerBar
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 6)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
             }
         }
     }
@@ -583,21 +583,21 @@ struct ContentView: View {
     }
 
     private var miniPlayerBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             compactArtworkView
                 .onTapGesture {
                     selectedTab = .nowPlaying
                 }
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 MarqueeText(
                     text: viewModel.nowPlayingTitle,
-                    font: .system(size: isMac ? 17 : 14, weight: .semibold),
+                    font: .system(size: isMac ? 18 : 15, weight: .semibold),
                     color: .white
                 )
 
                 Text(viewModel.authorMetadata)
-                    .font(.system(size: isMac ? 13 : 12, weight: .regular))
+                    .font(.system(size: isMac ? 14 : 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.55))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -608,13 +608,14 @@ struct ContentView: View {
                 selectedTab = .nowPlaying
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Button(action: viewModel.togglePlayback) {
                     Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
-                        .contentShape(Rectangle())
+                        .frame(width: 38, height: 38)
+                        .background(.white.opacity(0.14), in: Circle())
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
 
@@ -626,21 +627,17 @@ struct ContentView: View {
                     Image(systemName: "forward.fill")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
-                        .contentShape(Rectangle())
+                        .frame(width: 38, height: 38)
+                        .background(.white.opacity(0.10), in: Circle())
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.25), radius: 10, y: 5)
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .modifier(MiniPlayerBackgroundModifier())
+        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .onTapGesture {
             selectedTab = .nowPlaying
         }
@@ -2103,7 +2100,7 @@ struct LibrarySongRowView: View {
                     Text(song.artistNames)
                         .lineLimit(1)
 
-                    if song.isTTMLExpired {
+                    if song.needsUpdate {
                         Text("•")
                             .foregroundStyle(.white.opacity(0.3))
                         HStack(spacing: 3) {
@@ -2117,6 +2114,11 @@ struct LibrarySongRowView: View {
                             .foregroundStyle(.white.opacity(0.3))
                         Text("TTML")
                             .foregroundStyle(.white.opacity(0.5))
+                    } else if song.isInstrumentalOrNoLyrics {
+                        Text("•")
+                            .foregroundStyle(.white.opacity(0.3))
+                        Text("No Lyrics")
+                            .foregroundStyle(.white.opacity(0.4))
                     }
 
                     Text("•")
@@ -2149,7 +2151,7 @@ struct LibrarySongRowView: View {
                     }
 
                     Button(action: onUpdateTTML) {
-                        Label(song.isTTMLExpired ? "Update TTML Lyrics" : "Refresh Lyrics", systemImage: "arrow.triangle.2.circlepath")
+                        Label(song.needsUpdate ? "Update TTML Lyrics" : "Refresh Lyrics", systemImage: "arrow.triangle.2.circlepath")
                     }
                 } label: {
                     Image(systemName: "ellipsis")
@@ -2179,7 +2181,7 @@ struct LibrarySongRowView: View {
             }
 
             Button(action: onUpdateTTML) {
-                Label(song.isTTMLExpired ? "Update TTML Lyrics" : "Refresh Lyrics", systemImage: "arrow.triangle.2.circlepath")
+                Label(song.needsUpdate ? "Update TTML Lyrics" : "Refresh Lyrics", systemImage: "arrow.triangle.2.circlepath")
             }
         }
     }

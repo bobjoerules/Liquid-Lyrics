@@ -281,6 +281,8 @@ struct LibrarySong: Identifiable, Codable, Equatable {
     var ttmlContent: String?
     var ttmlSavedAt: Date?
     var lyricsSource: String?
+    var hasNoLyrics: Bool?
+    var lastCheckedForLyricsAt: Date?
 
     // Song played within the last 30 days
     var isPlayedInLast30Days: Bool {
@@ -295,10 +297,27 @@ struct LibrarySong: Identifiable, Codable, Equatable {
         return true
     }
 
-    // Saved TTML is older than 30 days (or never saved) -> must be updated!
+    // Explicitly verified to have no lyrics (instrumental or unindexed)
+    var isInstrumentalOrNoLyrics: Bool {
+        return (hasNoLyrics == true) && !hasTTML
+    }
+
+    // Saved TTML is older than 30 days
     var isTTMLExpired: Bool {
-        guard let savedAt = ttmlSavedAt else { return true }
+        guard let savedAt = ttmlSavedAt else { return false }
         return Date().timeIntervalSince(savedAt) >= 30 * 24 * 3600
+    }
+
+    // Whether this song truly needs a lyrics update
+    var needsUpdate: Bool {
+        if isInstrumentalOrNoLyrics {
+            return false
+        }
+        if hasTTML {
+            return isTTMLExpired
+        }
+        // If it has no TTML and has never been checked for lyrics
+        return lastCheckedForLyricsAt == nil
     }
 
     // Days until the 30-day TTML cache expires
