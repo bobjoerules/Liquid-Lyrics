@@ -24,6 +24,37 @@ Liquid Lyrics is a synchronized lyrics companion for iOS, powered by the **Spoti
 - **Liquid Glass Styling**: Uses Apple's native `.glassEffect(in:)` for Liquid Glass styling (iOS 26.0+) with high-fidelity glassmorphic fallbacks on earlier versions.
 - **Custom Icon**: Uses a custom **`LiquidPlayer.icon`** asset bundle (managed under `ios/LiquidPlayeriOS/Resources/`).
 
+---
+
+## Local Development & Setup
+
+This repository does not track `.xcodeproj` or `.xcworkspace` files in git (they are ignored via [.gitignore](.gitignore)). Instead, the Xcode project is declaratively defined in [ios/project.yml](ios/project.yml) and generated on demand using **[XcodeGen](https://github.com/yonaskolb/XcodeGen)**.
+
+### Prerequisites
+
+- macOS with Xcode installed
+- [XcodeGen](https://github.com/yonaskolb/XcodeGen) (installable via Homebrew):
+  ```bash
+  brew install xcodegen
+  ```
+
+### Generating the Xcode Project
+
+To generate or update the Xcode project locally:
+
+```bash
+cd ios
+xcodegen generate
+```
+
+This generates `LiquidPlayeriOS.xcodeproj` directly in the `ios/` folder. You can then open it with Xcode:
+
+```bash
+open LiquidPlayeriOS.xcodeproj
+```
+
+---
+
 ## Manual Builds
 
 GitHub Actions includes a manual workflow at [.github/workflows/build-mobile.yml](.github/workflows/build-mobile.yml).
