@@ -39,12 +39,25 @@ func groupSpicyWords(_ words: [LyricWord]) -> [SpicyWordGroup] {
 
     for (index, word) in words.enumerated() {
         current.append(word)
+
         let isLast = index == words.count - 1
-        if !word.isPartOfWord || isLast {
-            groups.append(SpicyWordGroup(words: current, hasTrailingSpace: !isLast))
+        let endsWithHyphen = word.text.hasSuffix("-") ||
+                             word.text.hasSuffix("–") ||
+                             word.text.hasSuffix("—")
+
+        // word.isPartOfWord == true means this syllable continues into the next syllable mid-word.
+        // word.isPartOfWord == false means this syllable completes the word.
+        // We only break mid-word if the word explicitly has a hyphen ("-") between syllables.
+        // Otherwise, all syllables stay together in one group so if too long, it wraps to a new line.
+        let shouldEndGroup = isLast || !word.isPartOfWord || endsWithHyphen
+
+        if shouldEndGroup {
+            let hasTrailingSpace = !isLast && !endsWithHyphen && !word.isPartOfWord
+            groups.append(SpicyWordGroup(words: current, hasTrailingSpace: hasTrailingSpace))
             current = []
         }
     }
+
     if !current.isEmpty {
         groups.append(SpicyWordGroup(words: current, hasTrailingSpace: false))
     }
@@ -127,13 +140,13 @@ struct LyricLine: Identifiable, Hashable {
         }
 
         var result = ""
-        for word in words {
-            let clean = word.text.trimmingCharacters(in: .whitespaces)
-            guard !clean.isEmpty else { continue }
-            if !result.isEmpty && !word.isPartOfWord {
+        for group in wordGroups {
+            let groupText = group.words.map { $0.text.trimmingCharacters(in: .whitespaces) }.joined()
+            guard !groupText.isEmpty else { continue }
+            if !result.isEmpty && !result.hasSuffix(" ") && !result.hasSuffix("-") {
                 result += " "
             }
-            result += clean
+            result += groupText
         }
         return result
     }
@@ -254,3 +267,63 @@ extension String {
         return combined.isEmpty ? [trimmed] : combined
     }
 }
+
+// MARK: - Library Song Model
+struct LibrarySong: Identifiable, Codable, Equatable {
+    let id: String
+    var name: String
+    var artistNames: String
+    var albumName: String?
+    var artworkUrl: String?
+    var durationMs: Int
+    var uri: String?
+    var lastPlayedAt: Date
+    var ttmlContent: String?
+    var ttmlSavedAt: Date?
+    var lyricsSource: String?
+
+    // Song played within the last 30 days
+    var isPlayedInLast30Days: Bool {
+        Date().timeIntervalSince(lastPlayedAt) < 30 * 24 * 3600
+    }
+
+    // Has saved TTML
+    var hasTTML: Bool {
+        guard let content = ttmlContent, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        return true
+    }
+
+    // Saved TTML is older than 30 days (or never saved) -> must be updated!
+    var isTTMLExpired: Bool {
+        guard let savedAt = ttmlSavedAt else { return true }
+        return Date().timeIntervalSince(savedAt) >= 30 * 24 * 3600
+    }
+
+    // Days until the 30-day TTML cache expires
+    var daysUntilTTMLExpires: Int {
+        guard let savedAt = ttmlSavedAt else { return 0 }
+        let elapsed = Date().timeIntervalSince(savedAt)
+        let remaining = (30 * 24 * 3600) - elapsed
+        return max(0, Int(ceil(remaining / (24 * 3600))))
+    }
+
+    // Days since last played
+    var daysAgoPlayed: Int {
+        let elapsed = Date().timeIntervalSince(lastPlayedAt)
+        return max(0, Int(floor(elapsed / (24 * 3600))))
+    }
+
+    var playedAgoDescription: String {
+        let days = daysAgoPlayed
+        if days == 0 {
+            return "Today"
+        } else if days == 1 {
+            return "Yesterday"
+        } else {
+            return "\(days)d ago"
+        }
+    }
+}
+

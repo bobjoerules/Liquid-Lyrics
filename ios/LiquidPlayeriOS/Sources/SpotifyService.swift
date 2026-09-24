@@ -87,6 +87,11 @@ struct SpotifySearchResult: Codable {
     let tracks: TracksWrapper?
 }
 
+struct SpotifyQueueResponse: Codable {
+    let currently_playing: SpotifyTrackItem?
+    let queue: [SpotifyTrackItem]?
+}
+
 @MainActor
 final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
     @Published var isAuthenticated: Bool = false
@@ -99,10 +104,9 @@ final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPrese
     @Published var activeDeviceName: String?
     @Published var authError: String?
 
-    private(set) var lastActiveDeviceId: String? {
-        get { UserDefaults.standard.string(forKey: "LiquidPlayer.spotifyLastDeviceId") }
-        set { UserDefaults.standard.set(newValue, forKey: "LiquidPlayer.spotifyLastDeviceId") }
-    }
+    private(set) var lastActiveDeviceId: String?
+    private var seekLockoutUntil: Date = .distantPast
+    private var expectedSeekMs: Int = 0
 
     private var accessToken: String? {
         get { UserDefaults.standard.string(forKey: "LiquidPlayer.spotifyAccessToken") }
@@ -130,6 +134,7 @@ final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPrese
 
     override init() {
         super.init()
+        UserDefaults.standard.removeObject(forKey: "LiquidPlayer.spotifyLastDeviceId")
         let hasSavedSession = (refreshToken != nil) || (accessToken != nil)
         if hasSavedSession {
             isAuthenticated = true
@@ -464,7 +469,15 @@ final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPrese
                 }
             }
             self.isPlaying = state.is_playing
-            self.progressMs = state.progress_ms ?? 0
+            let reportedProgress = state.progress_ms ?? 0
+            if Date() < self.seekLockoutUntil {
+                if abs(reportedProgress - self.expectedSeekMs) <= 1500 {
+                    self.progressMs = reportedProgress
+                    self.seekLockoutUntil = .distantPast
+                }
+            } else {
+                self.progressMs = reportedProgress
+            }
             self.isShuffleEnabled = state.shuffle_state ?? false
             if let device = state.device {
                 self.activeDeviceName = device.name
@@ -478,6 +491,43 @@ final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPrese
     // MARK: - Device Management
     struct SpotifyDevicesResponse: Codable {
         let devices: [SpotifyDeviceItem]
+    }
+
+    private func findBestTargetDevice(from devices: [SpotifyDeviceItem]) -> SpotifyDeviceItem? {
+        // 1. Any device that Spotify currently reports as active
+        if let active = devices.first(where: { $0.is_active }) {
+            return active
+        }
+
+        #if canImport(UIKit)
+        let currentDeviceName = UIDevice.current.name.lowercased()
+        // 2. Exact or substring match for current iPhone/iPad name
+        if let match = devices.first(where: {
+            let devName = $0.name.lowercased()
+            return devName == currentDeviceName || currentDeviceName.contains(devName) || devName.contains(currentDeviceName)
+        }) {
+            return match
+        }
+        // 3. Any mobile device (Smartphone / Tablet)
+        if let mobile = devices.first(where: {
+            let type = $0.type.lowercased()
+            return type == "smartphone" || type == "tablet"
+        }) {
+            return mobile
+        }
+        #elseif canImport(AppKit)
+        if let match = devices.first(where: { $0.type.lowercased() == "computer" }) {
+            return match
+        }
+        #endif
+
+        // 4. In-session last active device if available in list
+        if let lastId = lastActiveDeviceId, let match = devices.first(where: { $0.id == lastId }) {
+            return match
+        }
+
+        // 5. Fallback
+        return devices.first
     }
 
     func fetchAvailableDevices() async -> [SpotifyDeviceItem] {
@@ -497,43 +547,22 @@ final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPrese
         }
 
         let devices = decoded.devices
-        if let active = devices.first(where: { $0.is_active }) {
-            self.activeDeviceName = active.name
-            self.lastActiveDeviceId = active.id
-        } else if let first = devices.first {
-            if self.activeDeviceName == nil {
-                self.activeDeviceName = first.name
-            }
-            if self.lastActiveDeviceId == nil {
-                self.lastActiveDeviceId = first.id
-            }
+        if let best = findBestTargetDevice(from: devices) {
+            self.activeDeviceName = best.name
+            self.lastActiveDeviceId = best.id
         }
         return devices
     }
 
     func getOrSelectDeviceId() async -> String? {
-        if let id = lastActiveDeviceId {
-            return id
-        }
         let devices = await fetchAvailableDevices()
-        if let active = devices.first(where: { $0.is_active })?.id {
-            lastActiveDeviceId = active
-            return active
-        }
-        if let first = devices.first?.id {
-            lastActiveDeviceId = first
-            return first
-        }
-        return nil
+        return findBestTargetDevice(from: devices)?.id
     }
 
     // MARK: - Playback Controls
     func play() async {
-        var endpoint = "play"
-        if let devId = lastActiveDeviceId {
-            endpoint = "play?device_id=\(devId)"
-        }
-        let result = await sendPlayerCommand(endpoint: endpoint, method: "PUT")
+        // 1. Resume on the currently active playback device without forcing a device transfer
+        let result = await sendPlayerCommand(endpoint: "play", method: "PUT")
         if result.success {
             self.isPlaying = true
             try? await Task.sleep(nanoseconds: 200_000_000)
@@ -541,11 +570,10 @@ final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPrese
             return
         }
 
-        // If 404 (No active device), search for available devices
+        // 2. If 404 (no active playback session / device asleep), select best device (preferring this device / mobile)
         if result.statusCode == 404 {
             let devices = await fetchAvailableDevices()
-            if let target = devices.first(where: { $0.is_active }) ?? devices.first,
-               let targetId = target.id {
+            if let target = findBestTargetDevice(from: devices), let targetId = target.id {
                 self.lastActiveDeviceId = targetId
                 self.activeDeviceName = target.name
                 let retryResult = await sendPlayerCommand(endpoint: "play?device_id=\(targetId)", method: "PUT")
@@ -565,11 +593,7 @@ final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPrese
 
     func pause() async {
         self.isPlaying = false
-        var endpoint = "pause"
-        if let devId = lastActiveDeviceId {
-            endpoint = "pause?device_id=\(devId)"
-        }
-        let result = await sendPlayerCommand(endpoint: endpoint, method: "PUT")
+        let result = await sendPlayerCommand(endpoint: "pause", method: "PUT")
         if !result.success {
             await fetchPlaybackState()
         }
@@ -584,42 +608,29 @@ final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPrese
     }
 
     func next() async {
-        var endpoint = "next"
-        if let devId = lastActiveDeviceId {
-            endpoint = "next?device_id=\(devId)"
-        }
-        _ = await sendPlayerCommand(endpoint: endpoint, method: "POST")
+        _ = await sendPlayerCommand(endpoint: "next", method: "POST")
         try? await Task.sleep(nanoseconds: 300_000_000)
         await fetchPlaybackState()
     }
 
     func previous() async {
-        var endpoint = "previous"
-        if let devId = lastActiveDeviceId {
-            endpoint = "previous?device_id=\(devId)"
-        }
-        _ = await sendPlayerCommand(endpoint: endpoint, method: "POST")
+        _ = await sendPlayerCommand(endpoint: "previous", method: "POST")
         try? await Task.sleep(nanoseconds: 300_000_000)
         await fetchPlaybackState()
     }
 
     func seek(to positionMs: Int) async {
+        let now = Date()
+        self.seekLockoutUntil = now.addingTimeInterval(1.6)
+        self.expectedSeekMs = positionMs
         self.progressMs = positionMs
-        var endpoint = "seek?position_ms=\(positionMs)"
-        if let devId = lastActiveDeviceId {
-            endpoint += "&device_id=\(devId)"
-        }
-        _ = await sendPlayerCommand(endpoint: endpoint, method: "PUT")
+        _ = await sendPlayerCommand(endpoint: "seek?position_ms=\(positionMs)", method: "PUT")
     }
 
     func toggleShuffle() async {
         let newState = !isShuffleEnabled
         self.isShuffleEnabled = newState
-        var endpoint = "shuffle?state=\(newState)"
-        if let devId = lastActiveDeviceId {
-            endpoint += "&device_id=\(devId)"
-        }
-        _ = await sendPlayerCommand(endpoint: endpoint, method: "PUT")
+        _ = await sendPlayerCommand(endpoint: "shuffle?state=\(newState)", method: "PUT")
     }
 
     func fetchTrack(id: String) async -> SpotifyTrackItem? {
@@ -647,6 +658,39 @@ final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPrese
             return try JSONDecoder().decode(SpotifyTrackItem.self, from: data)
         } catch {
             return nil
+        }
+    }
+
+    func fetchQueue() async -> [SpotifyTrackItem] {
+        guard let token = await refreshTokenIfNeeded(),
+              let url = URL(string: "https://api.spotify.com/v1/me/player/queue") else {
+            return []
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 401 {
+                if let refreshedToken = await refreshTokenIfNeeded(force: true) {
+                    var retryRequest = URLRequest(url: url)
+                    retryRequest.setValue("Bearer \(refreshedToken)", forHTTPHeaderField: "Authorization")
+                    let (retryData, retryResponse) = try await URLSession.shared.data(for: retryRequest)
+                    if let retryHttp = retryResponse as? HTTPURLResponse, (200...299).contains(retryHttp.statusCode) {
+                        let decoded = try JSONDecoder().decode(SpotifyQueueResponse.self, from: retryData)
+                        return decoded.queue ?? []
+                    }
+                }
+                return []
+            }
+            guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+                return []
+            }
+            let decoded = try JSONDecoder().decode(SpotifyQueueResponse.self, from: data)
+            return decoded.queue ?? []
+        } catch {
+            return []
         }
     }
 
@@ -717,17 +761,27 @@ final class SpotifyService: NSObject, ObservableObject, ASWebAuthenticationPrese
     }
 
     func playTrack(uri: String) async {
-        let devId = await getOrSelectDeviceId()
-        var endpoint = "play"
-        if let d = devId {
-            endpoint = "play?device_id=\(d)"
-        }
-
         let body: [String: Any] = ["uris": [uri]]
         let bodyData = try? JSONSerialization.data(withJSONObject: body)
-        let result = await sendPlayerCommand(endpoint: endpoint, method: "PUT", body: bodyData)
+
+        // Try playing directly on current active device without transfer
+        let result = await sendPlayerCommand(endpoint: "play", method: "PUT", body: bodyData)
         if result.success {
             self.isPlaying = true
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            await fetchPlaybackState()
+            return
+        }
+
+        // If no active session, find best target device (preferring current device / phone)
+        let devices = await fetchAvailableDevices()
+        if let target = findBestTargetDevice(from: devices), let targetId = target.id {
+            self.lastActiveDeviceId = targetId
+            self.activeDeviceName = target.name
+            let retryResult = await sendPlayerCommand(endpoint: "play?device_id=\(targetId)", method: "PUT", body: bodyData)
+            if retryResult.success {
+                self.isPlaying = true
+            }
         }
         try? await Task.sleep(nanoseconds: 500_000_000)
         await fetchPlaybackState()

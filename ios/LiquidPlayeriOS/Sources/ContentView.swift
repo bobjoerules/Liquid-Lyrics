@@ -6,6 +6,9 @@ import AVFoundation
 #if canImport(UIKit)
 import UIKit
 #endif
+#if canImport(AppKit)
+import AppKit
+#endif
 
 private var isMac: Bool {
     #if targetEnvironment(macCatalyst)
@@ -24,20 +27,24 @@ struct ContentView: View {
         case settings
     }
 
-    private enum LibraryTab: String, CaseIterable, Identifiable {
-        case recents = "Recents"
-        case favorites = "Favorites"
+    private enum LibraryFilter: String, CaseIterable, Identifiable {
+        case all = "Last 30 Days"
+        case saved = "Saved TTML"
+        case needsUpdate = "Needs Update"
 
         var id: String { self.rawValue }
     }
 
     @StateObject private var viewModel = PlayerViewModel()
+    @ObservedObject private var libraryManager = LibraryManager.shared
     @AppStorage("hasCompletedIntro") private var hasCompletedIntro = false
     @State private var isFullScreenNowPlaying = false
     @State private var isDraggingSlider = false
     @State private var dragValue: Double = 0.0
     @State private var selectedTab: AppTab = .nowPlaying
-    @State private var libraryTab: LibraryTab = .recents
+    @State private var libraryFilter: LibraryFilter = .all
+    @State private var librarySearchText = ""
+    @State private var viewingTTMLSong: LibrarySong? = nil
     @State private var isShowingQueue = false
     @State private var isUserScrollingLyrics = false
     @State private var userScrollResumeTask: Task<Void, Never>? = nil
@@ -50,6 +57,9 @@ struct ContentView: View {
         mainContent
             .sheet(isPresented: $isShowingQueue) {
                 QueueView(viewModel: viewModel)
+            }
+            .sheet(item: $viewingTTMLSong) { song in
+                TTMLViewerSheet(song: song)
             }
             .background {
                 Button("") {
@@ -81,14 +91,11 @@ struct ContentView: View {
                             Label("Now Playing", systemImage: "quote.bubble.fill")
                         }
 
-                    // Library tab hidden for now
-                    /*
                     libraryPage
                         .tag(AppTab.library)
                         .tabItem {
                             Label("Library", systemImage: "music.note.list")
                         }
-                    */
 
                     settingsPage
                         .tag(AppTab.settings)
@@ -99,13 +106,6 @@ struct ContentView: View {
                 .tint(.white)
                 .toolbarBackground(.visible, for: .tabBar)
                 .toolbarBackground(.ultraThinMaterial, for: .tabBar)
-                .safeAreaInset(edge: .bottom) {
-                    if viewModel.selectedTrackID != nil && selectedTab != .nowPlaying {
-                        miniPlayerBar
-                            .padding(.horizontal, 14)
-                            .padding(.bottom, 58)
-                    }
-                }
             }
         }
     }
@@ -205,23 +205,20 @@ struct ContentView: View {
                             .buttonStyle(.plain)
                         }
 
-                        /*
                         Button {
-                            selectedTab = .library
+                            openSpotifyApp()
                         } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: "music.note.list")
-                                    .font(.system(size: 15, weight: .semibold))
-                                Text("Library")
+                                SpotifyLogoShape(size: 18, color: .white)
+                                Text("Open Spotify")
                                     .font(.system(size: 15, weight: .semibold))
                             }
                             .padding(.horizontal, 20)
                             .padding(.vertical, 12)
-                            .background(.white.opacity(0.12), in: Capsule())
+                            .background(viewModel.spotifyService.isAuthenticated ? Color(red: 0.11, green: 0.73, blue: 0.33) : .white.opacity(0.12), in: Capsule())
                             .foregroundStyle(.white)
                         }
                         .buttonStyle(.plain)
-                        */
                     }
                     .padding(.top, 8)
                 }
@@ -247,140 +244,247 @@ struct ContentView: View {
             SettingsView(viewModel: viewModel)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .safeAreaInset(edge: .bottom) {
+            if viewModel.selectedTrackID != nil {
+                miniPlayerBar
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+            }
+        }
     }
 
-    // MARK: - Library Page
+    // MARK: - Library Page (Songs Played in the Last 30 Days with Saved TTML)
     private var libraryPage: some View {
         ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .center) {
-                    Text("Library")
-                        .font(.system(size: isMac ? 48 : 36, weight: .semibold))
+            VStack(alignment: .leading, spacing: 16) {
+                // Header: Apple Music Large Title & Actions
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Library")
+                            .font(.system(size: isMac ? 38 : 34, weight: .bold))
+                            .foregroundStyle(.white)
+
+                        Text("Played in last 30 days")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+
+                    Spacer()
+
+                    Button {
+                        viewModel.shufflePlayLibrary()
+                        selectedTab = .nowPlaying
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "shuffle")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Shuffle")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
                         .foregroundStyle(.white)
-                        .lineLimit(1)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(Color.white.opacity(0.12), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(filteredLibrarySongs.isEmpty)
+                }
+                .padding(.top, 8)
 
-                    Spacer(minLength: 8)
+                // Outdated TTML Notice (Only shown if songs actually need update!)
+                if !libraryManager.songsNeedingTTMLUpdate.isEmpty {
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                            .foregroundStyle(Color.orange)
+                            .font(.system(size: 16))
 
-                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(libraryManager.songsNeedingTTMLUpdate.count) songs have outdated lyrics")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.white)
+                            Text("Played over 30 days ago")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.white.opacity(0.55))
+                        }
+
+                        Spacer()
+
                         Button {
                             Task {
-                                await viewModel.shufflePlay()
+                                await libraryManager.updateAllExpired()
                             }
                         } label: {
-                            Label("Shuffle", systemImage: "shuffle")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 10)
-                                .modifier(MiniPlayerCapsuleButtonModifier())
+                            if libraryManager.isBatchUpdating {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                            } else {
+                                Text("Update")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(.orange)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 5)
+                                    .background(Color.orange.opacity(0.2), in: Capsule())
+                            }
                         }
                         .buttonStyle(.plain)
+                        .disabled(libraryManager.isBatchUpdating)
                     }
-                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
 
-                // Category Selector
-                Picker("Category", selection: $libraryTab) {
-                    ForEach(LibraryTab.allCases) { tab in
-                        Text(tab.rawValue).tag(tab)
+                // Apple-style Segmented Filter
+                Picker("Filter", selection: $libraryFilter) {
+                    Text("All (\(libraryManager.songsPlayedInLast30Days.count))").tag(LibraryFilter.all)
+                    Text("Saved TTML (\(libraryManager.songsWithValidTTML.count))").tag(LibraryFilter.saved)
+                    if !libraryManager.songsNeedingTTMLUpdate.isEmpty {
+                        Text("Needs Update (\(libraryManager.songsNeedingTTMLUpdate.count))").tag(LibraryFilter.needsUpdate)
                     }
                 }
                 .pickerStyle(.segmented)
-                .padding(.vertical, 4)
 
-                if libraryTab == .recents {
-                    recentsList
+                // Search field
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.white.opacity(0.4))
+                        .font(.system(size: 14))
+
+                    TextField("Search library", text: $librarySearchText)
+                        .font(.system(size: 14))
+                        .foregroundStyle(.white)
+                        .autocorrectionDisabled()
+
+                    if !librarySearchText.isEmpty {
+                        Button {
+                            librarySearchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.white.opacity(0.4))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                // Songs List (Clean, Borderless Apple Music Rows)
+                let songs = filteredLibrarySongs
+                if songs.isEmpty {
+                    emptyLibraryState
                 } else {
-                    favoritesList
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
+                            VStack(spacing: 0) {
+                                LibrarySongRowView(
+                                    song: song,
+                                    isCurrent: viewModel.currentTrackId == song.id,
+                                    isUpdating: libraryManager.updatingTrackIds.contains(song.id),
+                                    onPlay: {
+                                        viewModel.playLibrarySong(song)
+                                        selectedTab = .nowPlaying
+                                    },
+                                    onUpdateTTML: {
+                                        Task {
+                                            _ = await libraryManager.updateTTML(for: song.id)
+                                        }
+                                    },
+                                    onViewTTML: {
+                                        viewingTTMLSong = song
+                                    }
+                                )
+
+                                if index < songs.count - 1 {
+                                    Divider()
+                                        .overlay(Color.white.opacity(0.08))
+                                        .padding(.leading, 64)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.top, 4)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 18)
-            .padding(.top, 24)
-            .padding(.bottom, 120)
+            .padding(.top, 16)
+            .padding(.bottom, 24)
         }
-    }
-
-    private var recentsList: some View {
-        Group {
-            if viewModel.recentTracks.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "clock")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.white.opacity(0.3))
-                    Text("No recently played tracks")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 60)
-            } else {
-                LazyVStack(spacing: 10) {
-                    ForEach(viewModel.recentTracks) { track in
-                        SpotifyTrackListRow(
-                            track: track,
-                            isActive: viewModel.selectedTrackID == track.id,
-                            isFavorite: viewModel.isTrackFavorite(track.id ?? ""),
-                            onSelect: {
-                                viewModel.playSpotifyTrack(track)
-                                selectedTab = .nowPlaying
-                            },
-                            onToggleFavorite: {
-                                if let id = track.id {
-                                    viewModel.toggleFavorite(id)
-                                }
-                            }
-                        )
-                    }
-                }
+        .safeAreaInset(edge: .bottom) {
+            if viewModel.selectedTrackID != nil {
+                miniPlayerBar
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
             }
         }
     }
 
-    private var favoritesList: some View {
-        let favorites = viewModel.recentTracks.filter { viewModel.isTrackFavorite($0.id ?? "") }
-        return Group {
-            if favorites.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "heart")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.white.opacity(0.3))
-                    Text("No favorite tracks yet")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.5))
-                    Text("Tap the heart icon while playing or searching to add favorites.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.35))
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 60)
-            } else {
-                LazyVStack(spacing: 10) {
-                    ForEach(favorites) { track in
-                        SpotifyTrackListRow(
-                            track: track,
-                            isActive: viewModel.selectedTrackID == track.id,
-                            isFavorite: true,
-                            onSelect: {
-                                viewModel.playSpotifyTrack(track)
-                                selectedTab = .nowPlaying
-                            },
-                            onToggleFavorite: {
-                                if let id = track.id {
-                                    viewModel.toggleFavorite(id)
-                                }
-                            }
-                        )
-                    }
-                }
-            }
+    private var filteredLibrarySongs: [LibrarySong] {
+        let base: [LibrarySong]
+        switch libraryFilter {
+        case .all:
+            base = libraryManager.songsPlayedInLast30Days
+        case .saved:
+            base = libraryManager.songsWithValidTTML
+        case .needsUpdate:
+            base = libraryManager.songsNeedingTTMLUpdate
+        }
+
+        if librarySearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return base
+        }
+
+        let query = librarySearchText.lowercased()
+        return base.filter {
+            $0.name.lowercased().contains(query) ||
+            $0.artistNames.lowercased().contains(query) ||
+            ($0.albumName?.lowercased().contains(query) ?? false)
         }
     }
 
+    @ViewBuilder
+    private var emptyLibraryState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: libraryFilter == .needsUpdate ? "checkmark.seal.fill" : "music.note.list")
+                .font(.system(size: 40))
+                .foregroundStyle(libraryFilter == .needsUpdate ? Color.green.opacity(0.8) : .white.opacity(0.35))
+
+            Text(emptyStateTitle)
+                .font(.system(size: 17, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white)
+
+            Text(emptyStateSubtitle)
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.5))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 60)
+    }
+
+    private var emptyStateTitle: String {
+        switch libraryFilter {
+        case .all:
+            return librarySearchText.isEmpty ? "No Songs Played in the Last 30 Days" : "No Matching Songs"
+        case .saved:
+            return "No Saved TTML Yet"
+        case .needsUpdate:
+            return "All Saved TTML Up to Date"
+        }
+    }
+
+    private var emptyStateSubtitle: String {
+        switch libraryFilter {
+        case .all:
+            return librarySearchText.isEmpty ? "Songs you play will automatically appear here with their saved TTML lyrics." : "Try searching for another track or artist name."
+        case .saved:
+            return "Play songs to automatically download and cache their TTML lyrics offline for 30 days."
+        case .needsUpdate:
+            return "All songs played in the last 30 days have fresh TTML lyrics (< 30 days old)."
+        }
+    }
 
     // MARK: - Top Bar
     private func topBar(title: String) -> some View {
@@ -479,34 +583,38 @@ struct ContentView: View {
     }
 
     private var miniPlayerBar: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             compactArtworkView
                 .onTapGesture {
                     selectedTab = .nowPlaying
                 }
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
                 MarqueeText(
                     text: viewModel.nowPlayingTitle,
-                    font: .system(size: isMac ? 18 : 15, weight: .semibold),
+                    font: .system(size: isMac ? 17 : 14, weight: .semibold),
                     color: .white
                 )
 
                 Text(viewModel.authorMetadata)
-                    .font(.system(size: isMac ? 14 : 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.54))
+                    .font(.system(size: isMac ? 13 : 12, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.55))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                selectedTab = .nowPlaying
+            }
 
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button(action: viewModel.togglePlayback) {
                     Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 38, height: 38)
-                        .background(.white.opacity(0.14), in: Circle())
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
 
@@ -518,16 +626,21 @@ struct ContentView: View {
                     Image(systemName: "forward.fill")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 38, height: 38)
-                        .background(.white.opacity(0.10), in: Circle())
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .modifier(MiniPlayerBackgroundModifier())
-        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 5)
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onTapGesture {
             selectedTab = .nowPlaying
         }
@@ -678,6 +791,7 @@ struct ContentView: View {
                             }
                         }
                 )
+                .scrollClipDisabled()
             }
             .mask(
                 LinearGradient(
@@ -715,7 +829,7 @@ struct ContentView: View {
                         userScrollResumeTask?.cancel()
                         withAnimation(.spring(response: 0.52, dampingFraction: 0.88)) {
                             isUserScrollingLyrics = false
-                            proxy.scrollTo(activeID, anchor: .center)
+                            proxy.scrollTo(activeID, anchor: lyricsScrollAnchor(for: activeID))
                         }
                     } label: {
                         HStack(spacing: 6) {
@@ -743,7 +857,7 @@ struct ContentView: View {
 
                 if !isUserScrollingLyrics {
                     withAnimation(.spring(response: 0.52, dampingFraction: 0.88)) {
-                        proxy.scrollTo(activeID, anchor: .center)
+                        proxy.scrollTo(activeID, anchor: lyricsScrollAnchor(for: activeID))
                     }
                 }
             }
@@ -754,7 +868,7 @@ struct ContentView: View {
                     try? await Task.sleep(nanoseconds: 60_000_000)
                     if let targetID = viewModel.activeLineID(for: displayedTimeMs) ?? viewModel.lines.first?.id {
                         withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
-                            proxy.scrollTo(targetID, anchor: .center)
+                            proxy.scrollTo(targetID, anchor: lyricsScrollAnchor(for: targetID))
                         }
                     }
                 }
@@ -766,7 +880,7 @@ struct ContentView: View {
                     try? await Task.sleep(nanoseconds: 60_000_000)
                     if let targetID = viewModel.activeLineID(for: displayedTimeMs) ?? newIds.first {
                         withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
-                            proxy.scrollTo(targetID, anchor: .center)
+                            proxy.scrollTo(targetID, anchor: lyricsScrollAnchor(for: targetID))
                         }
                     }
                 }
@@ -776,10 +890,25 @@ struct ContentView: View {
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 60_000_000)
                     if let activeID = viewModel.activeLineID(for: displayedTimeMs) ?? viewModel.lines.first?.id {
-                        proxy.scrollTo(activeID, anchor: .center)
+                        proxy.scrollTo(activeID, anchor: lyricsScrollAnchor(for: activeID))
                     }
                 }
             }
+        }
+    }
+
+    private func lyricsScrollAnchor(for lineID: UUID?) -> UnitPoint {
+        guard let lineID = lineID else { return .center }
+        let visibleLines = viewModel.lines.filter { !$0.isSongwriter }
+        guard let index = visibleLines.firstIndex(where: { $0.id == lineID }) else {
+            return .center
+        }
+        if index == 0 {
+            return UnitPoint(x: 0.5, y: 0.18)
+        } else if index == 1 {
+            return UnitPoint(x: 0.5, y: 0.32)
+        } else {
+            return .center
         }
     }
 
@@ -795,7 +924,7 @@ struct ContentView: View {
         let isActive: Bool = isTimeActive || (line.id == activeID)
         let isPast: Bool = !isActive && (displayedTimeMs > effectiveEnd)
         let distance: Int = activeIndex >= 0 ? (index - activeIndex) : 0
-        let lineTimeMs: Int = isActive ? displayedTimeMs : 0
+        let lineTimeMs: Int = (isActive || line.isInterlude) ? displayedTimeMs : (isPast ? line.endMs : 0)
 
         SpicyLyricLineView(
             line: line,
@@ -828,16 +957,18 @@ struct ContentView: View {
                 Spacer()
             }
 
-            // Far right control
+            // Far right control: Open Spotify
             HStack {
                 Spacer()
-                controlButton(
-                    systemName: viewModel.isCurrentTrackFavorite() ? "heart.fill" : "heart",
-                    isActive: viewModel.isCurrentTrackFavorite(),
-                    isAction: false
-                ) {
-                    viewModel.toggleFavoriteCurrentTrack()
+                Button {
+                    openSpotifyApp()
+                } label: {
+                    SpotifyLogoShape(size: 24, color: .white)
+                        .frame(width: 52, height: 52)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .help("Open in Spotify")
             }
 
             // Centered controls
@@ -885,6 +1016,26 @@ struct ContentView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private func openSpotifyApp() {
+        #if canImport(UIKit)
+        if let appUrl = URL(string: "spotify:") {
+            UIApplication.shared.open(appUrl, options: [:]) { success in
+                if !success {
+                    if let webUrl = URL(string: "https://open.spotify.com") {
+                        UIApplication.shared.open(webUrl)
+                    }
+                }
+            }
+        }
+        #elseif canImport(AppKit)
+        if let appUrl = URL(string: "spotify:") {
+            NSWorkspace.shared.open(appUrl)
+        } else if let webUrl = URL(string: "https://open.spotify.com") {
+            NSWorkspace.shared.open(webUrl)
+        }
+        #endif
     }
 
     private func syncButton(title: String, action: @escaping () -> Void) -> some View {
@@ -1232,7 +1383,66 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Spotify Track Row & Artwork Components
+// MARK: - Spotify Brand Icon & Artwork Components
+struct SpotifyLogoShape: View {
+    var size: CGFloat = 24
+    var color: Color = .white
+
+    var body: some View {
+        Canvas { context, canvasSize in
+            let w = canvasSize.width
+            let h = canvasSize.height
+            let s = min(w, h) / 24.0
+
+            // 1. Draw solid circular base disc
+            let circleRect = CGRect(x: 0, y: 0, width: 24.0 * s, height: 24.0 * s)
+            context.fill(Path(ellipseIn: circleRect), with: .color(color))
+
+            // 2. Cut out authentic Spotify sound waves using destinationOut
+            var waves = context
+            waves.blendMode = .destinationOut
+
+            func drawWave(start: CGPoint, control1: CGPoint, control2: CGPoint, end: CGPoint, strokeWidth: CGFloat) {
+                var path = Path()
+                path.move(to: CGPoint(x: start.x * s, y: start.y * s))
+                path.addCurve(
+                    to: CGPoint(x: end.x * s, y: end.y * s),
+                    control1: CGPoint(x: control1.x * s, y: control1.y * s),
+                    control2: CGPoint(x: control2.x * s, y: control2.y * s)
+                )
+                waves.stroke(
+                    path,
+                    with: .color(.black),
+                    style: StrokeStyle(lineWidth: strokeWidth * s, lineCap: .round)
+                )
+            }
+
+            drawWave(
+                start: CGPoint(x: 4.8, y: 8.6),
+                control1: CGPoint(x: 10.5, y: 6.8),
+                control2: CGPoint(x: 15.5, y: 7.2),
+                end: CGPoint(x: 19.5, y: 9.8),
+                strokeWidth: 2.2
+            )
+            drawWave(
+                start: CGPoint(x: 5.4, y: 12.0),
+                control1: CGPoint(x: 10.6, y: 10.4),
+                control2: CGPoint(x: 14.8, y: 10.8),
+                end: CGPoint(x: 18.8, y: 13.0),
+                strokeWidth: 1.95
+            )
+            drawWave(
+                start: CGPoint(x: 6.2, y: 15.2),
+                control1: CGPoint(x: 10.8, y: 13.8),
+                control2: CGPoint(x: 14.2, y: 14.2),
+                end: CGPoint(x: 17.6, y: 16.0),
+                strokeWidth: 1.65
+            )
+        }
+        .frame(width: size, height: size)
+    }
+}
+
 struct SpotifyArtworkView: View {
     let url: URL?
     let size: CGFloat
@@ -1849,7 +2059,220 @@ struct QueueView: View {
                 }
             }
             .preferredColorScheme(.dark)
+            .task {
+                await viewModel.prefetchUpcomingLyrics()
+            }
         }
+    }
+}
+
+// MARK: - Library Song Row & TTML Sheet Components
+
+struct LibrarySongRowView: View {
+    let song: LibrarySong
+    let isCurrent: Bool
+    let isUpdating: Bool
+    let onPlay: () -> Void
+    let onUpdateTTML: () -> Void
+    let onViewTTML: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Artwork
+            ZStack {
+                SpotifyArtworkView(url: song.artworkUrl.flatMap(URL.init), size: 48, cornerRadius: 6)
+
+                if isCurrent {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.black.opacity(0.45))
+                    Image(systemName: "speaker.wave.2.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(Color(red: 0.11, green: 0.73, blue: 0.33))
+                }
+            }
+            .frame(width: 48, height: 48)
+
+            // Song Info & Metadata (Apple Music Style)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(song.name)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(isCurrent ? Color(red: 0.11, green: 0.73, blue: 0.33) : .white)
+                    .lineLimit(1)
+
+                HStack(spacing: 5) {
+                    Text(song.artistNames)
+                        .lineLimit(1)
+
+                    if song.isTTMLExpired {
+                        Text("•")
+                            .foregroundStyle(.white.opacity(0.3))
+                        HStack(spacing: 3) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .font(.system(size: 10))
+                            Text("Update Needed")
+                        }
+                        .foregroundStyle(Color.orange)
+                    } else if song.hasTTML {
+                        Text("•")
+                            .foregroundStyle(.white.opacity(0.3))
+                        Text("TTML")
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+
+                    Text("•")
+                        .foregroundStyle(.white.opacity(0.3))
+                    Text(song.playedAgoDescription)
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.55))
+            }
+
+            Spacer(minLength: 8)
+
+            // Apple standard 3-dot action menu
+            if isUpdating {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white.opacity(0.8))
+                    .frame(width: 32, height: 32)
+            } else {
+                Menu {
+                    Button(action: onPlay) {
+                        Label("Play", systemImage: "play.fill")
+                    }
+
+                    if song.hasTTML {
+                        Button(action: onViewTTML) {
+                            Label("View TTML Lyrics", systemImage: "quote.bubble")
+                        }
+                    }
+
+                    Button(action: onUpdateTTML) {
+                        Label(song.isTTMLExpired ? "Update TTML Lyrics" : "Refresh Lyrics", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onPlay()
+        }
+        .contextMenu {
+            Button(action: onPlay) {
+                Label("Play", systemImage: "play.fill")
+            }
+
+            if song.hasTTML {
+                Button(action: onViewTTML) {
+                    Label("View TTML Lyrics", systemImage: "quote.bubble")
+                }
+            }
+
+            Button(action: onUpdateTTML) {
+                Label(song.isTTMLExpired ? "Update TTML Lyrics" : "Refresh Lyrics", systemImage: "arrow.triangle.2.circlepath")
+            }
+        }
+    }
+}
+
+struct TTMLViewerSheet: View {
+    let song: LibrarySong
+    @Environment(\.dismiss) private var dismiss
+    @State private var copied = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                // Track metadata header
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(song.name)
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+
+                    Text(song.artistNames)
+                        .font(.system(size: 14))
+                        .foregroundStyle(.white.opacity(0.65))
+
+                    HStack(spacing: 8) {
+                        Text(song.isTTMLExpired ? "⚠️ Saved over 30 days ago (Update needed)" : "✓ Saved TTML (\(song.daysUntilTTMLExpires) days remaining)")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(song.isTTMLExpired ? .orange : .green)
+
+                        if let date = song.ttmlSavedAt {
+                            Text("• Saved \(date.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.white.opacity(0.45))
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+
+                Divider()
+                    .overlay(.white.opacity(0.12))
+
+                // TTML XML Content
+                ScrollView {
+                    Text(song.ttmlContent ?? "No TTML saved for this song.")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .background(Color.black.opacity(0.45))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+            }
+            .background(Color(red: 0.08, green: 0.08, blue: 0.10).ignoresSafeArea())
+            .navigationTitle("Saved TTML")
+            #if canImport(UIKit)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                    .foregroundStyle(.white)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    if let content = song.ttmlContent, !content.isEmpty {
+                        Button {
+                            #if canImport(UIKit)
+                            UIPasteboard.general.string = content
+                            #elseif canImport(AppKit)
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(content, forType: .string)
+                            #endif
+                            copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                copied = false
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                Text(copied ? "Copied" : "Copy TTML")
+                            }
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                        }
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 

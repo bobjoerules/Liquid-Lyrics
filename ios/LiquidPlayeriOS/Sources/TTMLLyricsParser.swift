@@ -319,11 +319,6 @@ private struct ParagraphState {
         }
 
         if rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if isBackgroundToken {
-                backgroundPreviousEndedMidWord = false
-            } else {
-                previousEndedMidWord = false
-            }
             return
         }
 
@@ -349,17 +344,21 @@ private struct ParagraphState {
         for (tokenIndex, token) in spaceTokens.enumerated() {
             let subTokens = splitKeepingTrailingHyphen(token)
             for (subIndex, subToken) in subTokens.enumerated() {
-                let isAttached: Bool
-                if tokenIndex == 0 && subIndex == 0 {
-                    if isBackgroundToken {
-                        isAttached = backgroundPreviousEndedMidWord && !startsWithSpace
-                    } else {
-                        isAttached = previousEndedMidWord && !startsWithSpace
-                    }
+                let isLastSub = subIndex == subTokens.count - 1
+                let isLastToken = tokenIndex == spaceTokens.count - 1
+
+                let isPartOfWord: Bool
+                if !isLastSub {
+                    // Ends with hyphen or split mid-token: continues into next syllable
+                    isPartOfWord = true
+                } else if !isLastToken {
+                    // Followed by whitespace within the same span: completes word
+                    isPartOfWord = false
                 } else {
-                    isAttached = subIndex > 0
+                    // Last token in the span: continues if the span does NOT end with whitespace
+                    isPartOfWord = !endsWithSpace
                 }
-                wordsToAdd.append((subToken, isAttached))
+                wordsToAdd.append((subToken, isPartOfWord))
             }
         }
 
@@ -373,7 +372,7 @@ private struct ParagraphState {
             let wordEnd = index == wordsToAdd.count - 1 ? end : start + ((index + 1) * chunkDuration)
             let wordDuration = wordEnd - wordStart
             let token = entry.0
-            let isLetterGroup = token.count > 1
+            let isLetterGroup = wordDuration >= 1000 && token.count > 1
 
             let letters: [LyricLetter]
             if isLetterGroup {
@@ -470,7 +469,7 @@ private struct ParagraphState {
         var current = ""
         for char in token {
             current.append(char)
-            if char == "-" {
+            if char == "-" || char == "–" || char == "—" || char == "/" {
                 result.append(current)
                 current = ""
             }
@@ -548,3 +547,99 @@ private func paddedMilliseconds(_ raw: String) -> Int {
     let padded = prefix.padding(toLength: 3, withPad: "0", startingAt: 0)
     return Int(padded) ?? 0
 }
+
+// MARK: - TTML Exporter
+enum TTMLExporter {
+    static func export(
+        lines: [LyricLine],
+        songwriters: [String] = [],
+        title: String? = nil,
+        artist: String? = nil
+    ) -> String {
+        var xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+        xml += "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:ttm=\"http://www.w3.org/ns/ttml#metadata\">\n"
+        xml += "  <head>\n"
+        xml += "    <metadata>\n"
+        if let title = title, !title.isEmpty {
+            xml += "      <ttm:title>\(xmlEscape(title))</ttm:title>\n"
+        }
+        if let artist = artist, !artist.isEmpty {
+            xml += "      <ttm:agent type=\"person\">\(xmlEscape(artist))</ttm:agent>\n"
+        }
+        for songwriter in songwriters {
+            xml += "      <songwriter>\(xmlEscape(songwriter))</songwriter>\n"
+        }
+        xml += "    </metadata>\n"
+        xml += "  </head>\n"
+        xml += "  <body>\n"
+        xml += "    <div>\n"
+
+        let regularLines = lines.filter { !$0.isSongwriter && !$0.isInterlude }
+        for line in regularLines {
+            let start = formatTime(ms: line.startMs)
+            let end = formatTime(ms: line.endMs)
+            let agentAttr = line.agent.map { " agent=\"\(xmlEscape($0))\"" } ?? ""
+            let backgroundAttr = line.isBackground ? " ttm:role=\"background\"" : ""
+
+            xml += "      <p begin=\"\(start)\" end=\"\(end)\"\(agentAttr)\(backgroundAttr)>\n"
+
+            if line.isWordSynced && !line.words.isEmpty {
+                for (wIndex, word) in line.words.enumerated() {
+                    let wStart = formatTime(ms: word.startMs)
+                    let wEnd = formatTime(ms: word.endMs)
+                    let isLast = wIndex == line.words.count - 1
+                    let trailing = (!isLast && !word.isPartOfWord && !word.text.hasSuffix("-")) ? " " : ""
+                    xml += "        <span begin=\"\(wStart)\" end=\"\(wEnd)\">\(xmlEscape(word.text))\(trailing)</span>\n"
+                }
+            } else {
+                xml += "        <span>\(xmlEscape(line.displayText))</span>\n"
+            }
+
+            if let trans = line.translation, !trans.isEmpty {
+                xml += "        <span ttm:role=\"translation\">\(xmlEscape(trans))</span>\n"
+            }
+            if let rom = line.romanization, !rom.isEmpty {
+                xml += "        <span ttm:role=\"romanization\">\(xmlEscape(rom))</span>\n"
+            }
+
+            xml += "      </p>\n"
+        }
+
+        xml += "    </div>\n"
+        xml += "  </body>\n"
+        xml += "</tt>\n"
+        return xml
+    }
+
+    static func export(
+        parsed: ParsedLyrics,
+        title: String? = nil,
+        artist: String? = nil
+    ) -> String {
+        return export(
+            lines: parsed.lines,
+            songwriters: parsed.songwriters,
+            title: title,
+            artist: artist
+        )
+    }
+
+    private static func formatTime(ms: Int) -> String {
+        let totalSeconds = max(0, ms) / 1000
+        let milliseconds = max(0, ms) % 1000
+        let seconds = totalSeconds % 60
+        let minutes = (totalSeconds / 60) % 60
+        let hours = totalSeconds / 3600
+        return String(format: "%02d:%02d:%02d.%03d", hours, minutes, seconds, milliseconds)
+    }
+
+    private static func xmlEscape(_ string: String) -> String {
+        return string
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
+    }
+}
+

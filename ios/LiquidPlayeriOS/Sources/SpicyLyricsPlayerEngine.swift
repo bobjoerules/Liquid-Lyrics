@@ -218,16 +218,46 @@ struct SpicySyllableTokenView: View {
     }
 }
 
+// MARK: - Spicy Word Group View (Seamless Syllables & Whole-Word Wrap)
+
+struct SpicyWordGroupView: View {
+    let group: SpicyWordGroup
+    let currentTimeMs: Int
+    let isBackground: Bool
+    let isLineActive: Bool
+    let isLinePast: Bool
+    let lineFont: Font
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(group.words) { word in
+                SpicySyllableTokenView(
+                    word: word,
+                    currentTimeMs: currentTimeMs,
+                    isBackground: isBackground,
+                    isLineActive: isLineActive,
+                    isLinePast: isLinePast
+                )
+            }
+            if group.hasTrailingSpace {
+                Text(" ")
+                    .font(lineFont)
+            }
+        }
+    }
+}
+
 // MARK: - Spicy Countdown Dot Line (AMLL-TTML-TOOL dotLine)
 
 struct SpicyDotLineView: View {
     let line: LyricLine
     let currentTimeMs: Int
+    let isLineActive: Bool
 
     var body: some View {
-        let isPast = currentTimeMs > line.endMs
-        let isPreCollapsing = currentTimeMs > line.endMs - 500
-        let isVisible = currentTimeMs >= line.startMs && !isPast
+        let isPast = (currentTimeMs > line.endMs) || !isLineActive
+        let isPreCollapsing = currentTimeMs > (line.endMs - 500)
+        let isVisible = isLineActive && !isPast && (currentTimeMs >= line.startMs)
 
         let total = max(line.endMs - line.startMs, 1)
         let base = Double(total) / 3.0
@@ -265,7 +295,8 @@ struct SpicyDotLineView: View {
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: line.oppositeAligned ? .trailing : .leading)
-        .padding(line.oppositeAligned ? .leading : .trailing, 48)
+        .padding(.leading, line.oppositeAligned ? 36 : 16)
+        .padding(.trailing, line.oppositeAligned ? 16 : 36)
         .scaleEffect(isVisible && !isPreCollapsing ? 1.0 : 0.0)
         .opacity(isVisible && !isPreCollapsing ? 1.0 : 0.0)
         .animation(.spring(response: 0.38, dampingFraction: 0.75), value: isPreCollapsing)
@@ -288,7 +319,14 @@ struct SpicyFlowLayout: Layout {
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let width = proposal.width ?? .infinity
+        let defaultWidth: CGFloat = {
+            #if canImport(UIKit)
+            return UIScreen.main.bounds.width - 64
+            #else
+            return 340
+            #endif
+        }()
+        let width = (proposal.width != nil && proposal.width! > 0 && proposal.width! != .infinity) ? proposal.width! : defaultWidth
         var currentPoint = CGPoint.zero
         var maxRowHeight: CGFloat = 0
         var totalHeight: CGFloat = 0
@@ -340,9 +378,9 @@ struct SpicyFlowLayout: Layout {
             let xOffset: CGFloat
             switch alignment {
             case .trailing:
-                xOffset = bounds.maxX - actualRowWidth
+                xOffset = max(bounds.minX, bounds.maxX - actualRowWidth)
             case .center:
-                xOffset = bounds.minX + (bounds.width - actualRowWidth) / 2
+                xOffset = max(bounds.minX, bounds.minX + (bounds.width - actualRowWidth) / 2)
             default:
                 xOffset = bounds.minX
             }
@@ -350,7 +388,9 @@ struct SpicyFlowLayout: Layout {
             var x = xOffset
             var rowMaxHeight: CGFloat = 0
             for (subview, size) in zip(subviewsInRow, sizes) {
-                subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                let maxAvailableWidth = max(10, bounds.maxX - x)
+                let subviewWidth = min(size.width, maxAvailableWidth)
+                subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(width: subviewWidth, height: size.height))
                 x += size.width + horizontalSpacing
                 rowMaxHeight = max(rowMaxHeight, size.height)
             }
@@ -408,11 +448,21 @@ struct SpicyLyricLineView: View, Equatable {
     var body: some View {
         Group {
             if line.isInterlude {
-                if isLineActive {
-                    SpicyDotLineView(line: line, currentTimeMs: currentTimeMs)
-                        .padding(.vertical, 4)
-                        .transition(.scale(scale: 0.8).combined(with: .opacity))
+                let isCurrent = isLineActive && (currentTimeMs >= line.startMs && currentTimeMs < line.endMs)
+                SpicyDotLineView(
+                    line: line,
+                    currentTimeMs: currentTimeMs,
+                    isLineActive: isCurrent
+                )
+                .frame(height: isCurrent ? 44 : 0)
+                .opacity(isCurrent ? 1.0 : 0.0)
+                .clipped()
+                .frame(maxWidth: .infinity, alignment: line.oppositeAligned ? .trailing : .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onSeek(max(0, line.startMs + 5))
                 }
+                .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isCurrent)
             } else {
                 VStack(alignment: line.oppositeAligned ? .trailing : .leading, spacing: 6) {
                     if line.isSongwriter {
@@ -431,21 +481,14 @@ struct SpicyLyricLineView: View, Equatable {
                         // Word groups with preserve-word line wrap and syllable-level progressive physics
                         SpicyFlowLayout(alignment: line.oppositeAligned ? .trailing : .leading) {
                             ForEach(line.wordGroups) { group in
-                                HStack(spacing: 0) {
-                                    ForEach(group.words) { word in
-                                        SpicySyllableTokenView(
-                                            word: word,
-                                            currentTimeMs: currentTimeMs,
-                                            isBackground: line.isBackground,
-                                            isLineActive: isLineActive,
-                                            isLinePast: isLinePast
-                                        )
-                                    }
-                                    if group.hasTrailingSpace {
-                                        Text(" ")
-                                            .font(lineFont)
-                                    }
-                                }
+                                SpicyWordGroupView(
+                                    group: group,
+                                    currentTimeMs: currentTimeMs,
+                                    isBackground: line.isBackground,
+                                    isLineActive: isLineActive,
+                                    isLinePast: isLinePast,
+                                    lineFont: lineFont
+                                )
                             }
                         }
                         .font(lineFont)
@@ -469,27 +512,28 @@ struct SpicyLyricLineView: View, Equatable {
                 }
                 .opacity(lineOpacity)
                 .scaleEffect(isLineActive ? 1.0 : 0.96, anchor: line.oppositeAligned ? .trailing : .leading)
+                .animation(.spring(response: 0.44, dampingFraction: 0.82), value: isLineActive)
                 .modifier(OptionalBlurModifier(radius: lineBlur))
                 .padding(.top, line.isBackground ? -4 : 10)
                 .padding(.bottom, line.isBackground ? 10 : 12)
                 .frame(maxWidth: .infinity, alignment: line.oppositeAligned ? .trailing : .leading)
-                .padding(line.oppositeAligned ? .leading : .trailing, 48)
+                .padding(.leading, line.oppositeAligned ? 36 : 16)
+                .padding(.trailing, line.oppositeAligned ? 16 : 36)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     if !line.isSongwriter {
-                        onSeek(line.startMs)
+                        onSeek(max(0, line.startMs + 5))
                     }
                 }
-                .animation(.spring(response: 0.44, dampingFraction: 0.82), value: isLineActive)
             }
         }
     }
 
     private var lineFont: Font {
         if line.isBackground {
-            return .system(size: 24, weight: .bold, design: .rounded)
+            return .system(size: 22, weight: .bold, design: .rounded)
         }
-        return .system(size: 32, weight: .heavy, design: .rounded)
+        return .system(size: 28, weight: .heavy, design: .rounded)
     }
 
     private var lineOpacity: Double {

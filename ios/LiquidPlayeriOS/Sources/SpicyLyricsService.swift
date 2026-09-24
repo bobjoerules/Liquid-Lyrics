@@ -100,6 +100,30 @@ actor SpicyLyricsService {
     static let shared = SpicyLyricsService()
     
     private var cache: [String: ParsedLyrics] = [:]
+    private var inFlightTasks: [String: Task<ParsedLyrics, Error>] = [:]
+
+    func getCachedLyrics(for trackId: String) -> ParsedLyrics? {
+        let cleanId = trackId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cache[cleanId]
+    }
+
+    func isLyricsCached(for trackId: String) -> Bool {
+        let cleanId = trackId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cache[cleanId] != nil
+    }
+
+    func prefetchLyrics(for trackId: String) async {
+        let cleanId = trackId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else { return }
+        if cache[cleanId] != nil { return }
+        _ = try? await fetchLyrics(for: cleanId)
+    }
+
+    func prefetchLyrics(for trackIds: [String]) async {
+        for id in trackIds.prefix(5) {
+            await prefetchLyrics(for: id)
+        }
+    }
 
     func fetchLyrics(for trackId: String) async throws -> ParsedLyrics {
         let cleanId = trackId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -111,38 +135,56 @@ actor SpicyLyricsService {
             return cached
         }
 
-        guard let url = URL(string: "https://api.spicylyrics.org/v1/lyrics/\(cleanId)") else {
-            throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid URL."])
+        // Deduplicate in-flight requests for the same track
+        if let existingTask = inFlightTasks[cleanId] {
+            return try await existingTask.value
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(APIConfig.spicyLyricsApiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: -1, userInfo: [NSLocalizedDescriptionKey: "Network error"])
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            if httpResponse.statusCode == 404 {
-                throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: 404, userInfo: [NSLocalizedDescriptionKey: "Lyrics not found for this track."])
+        let task = Task<ParsedLyrics, Error> {
+            guard let url = URL(string: "https://api.spicylyrics.org/v1/lyrics/\(cleanId)") else {
+                throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid URL."])
             }
-            if httpResponse.statusCode == 503 {
-                throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: 503, userInfo: [NSLocalizedDescriptionKey: "Upstream lyrics service temporarily unavailable."])
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.setValue("Bearer \(APIConfig.spicyLyricsApiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: -1, userInfo: [NSLocalizedDescriptionKey: "Network error"])
             }
-            throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"])
+
+            guard httpResponse.statusCode == 200 else {
+                if httpResponse.statusCode == 404 {
+                    throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: 404, userInfo: [NSLocalizedDescriptionKey: "Lyrics not found for this track."])
+                }
+                if httpResponse.statusCode == 503 {
+                    throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: 503, userInfo: [NSLocalizedDescriptionKey: "Upstream lyrics service temporarily unavailable."])
+                }
+                throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"])
+            }
+
+            let envelope = try JSONDecoder().decode(SpicyLyricsEnvelope.self, from: data)
+            guard let body = envelope.Body else {
+                throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: -2, userInfo: [NSLocalizedDescriptionKey: "Empty lyrics response"])
+            }
+
+            let parsed = self.parseLyricsBody(body)
+            return parsed
         }
 
-        let envelope = try JSONDecoder().decode(SpicyLyricsEnvelope.self, from: data)
-        guard let body = envelope.Body else {
-            throw NSError(domain: "LiquidPlayer.SpicyLyrics", code: -2, userInfo: [NSLocalizedDescriptionKey: "Empty lyrics response"])
-        }
+        inFlightTasks[cleanId] = task
 
-        let parsed = parseLyricsBody(body)
-        cache[cleanId] = parsed
-        return parsed
+        do {
+            let result = try await task.value
+            inFlightTasks.removeValue(forKey: cleanId)
+            cache[cleanId] = result
+            return result
+        } catch {
+            inFlightTasks.removeValue(forKey: cleanId)
+            throw error
+        }
     }
 
     private func parseLyricsBody(_ body: SpicyLyricsBody) -> ParsedLyrics {
@@ -184,7 +226,7 @@ actor SpicyLyricsService {
                     
                     var words: [LyricWord] = []
                     if let syllables = lead.Syllables {
-                        for syl in syllables {
+                        for (sylIndex, syl) in syllables.enumerated() {
                             let sylStart = Int(syl.StartTime * 1000.0)
                             let sylEnd = Int(syl.EndTime * 1000.0)
                             let rawToken = syl.Text
@@ -245,7 +287,7 @@ actor SpicyLyricsService {
                             let bgStart = Int((bg.StartTime ?? Double(startMs) / 1000.0) * 1000.0)
                             var bgWords: [LyricWord] = []
                             if let bgSyllables = bg.Syllables {
-                                for syl in bgSyllables {
+                                for (sylIndex, syl) in bgSyllables.enumerated() {
                                     let sStart = Int(syl.StartTime * 1000.0)
                                     let sEnd = Int(syl.EndTime * 1000.0)
                                     let rawToken = syl.Text
