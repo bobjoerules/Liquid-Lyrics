@@ -39,6 +39,7 @@ struct ContentView: View {
     @ObservedObject private var libraryManager = LibraryManager.shared
     @AppStorage("hasCompletedIntro") private var hasCompletedIntro = false
     @State private var isFullScreenNowPlaying = false
+    @State private var isFullScreenControlsHidden = false
     @State private var isDraggingSlider = false
     @State private var dragValue: Double = 0.0
     @State private var selectedTab: AppTab = .nowPlaying
@@ -68,6 +69,11 @@ struct ContentView: View {
                 .keyboardShortcut(.space, modifiers: [])
                 .opacity(0)
                 .allowsHitTesting(false)
+            }
+            .onChange(of: isFullScreenNowPlaying) { _, isFS in
+                if !isFS {
+                    isFullScreenControlsHidden = false
+                }
             }
     }
 
@@ -586,7 +592,9 @@ struct ContentView: View {
         HStack(spacing: 14) {
             compactArtworkView
                 .onTapGesture {
-                    selectedTab = .nowPlaying
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
+                        isFullScreenNowPlaying = true
+                    }
                 }
 
             VStack(alignment: .leading, spacing: 3) {
@@ -605,7 +613,9 @@ struct ContentView: View {
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .onTapGesture {
-                selectedTab = .nowPlaying
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
+                    isFullScreenNowPlaying = true
+                }
             }
 
             HStack(spacing: 10) {
@@ -639,7 +649,9 @@ struct ContentView: View {
         .modifier(MiniPlayerBackgroundModifier())
         .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .onTapGesture {
-            selectedTab = .nowPlaying
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
+                isFullScreenNowPlaying = true
+            }
         }
     }
 
@@ -708,7 +720,7 @@ struct ContentView: View {
     private func lyricsPanel(isFullScreen: Bool = false) -> some View {
         ScrollViewReader { proxy in
             VStack(alignment: .leading, spacing: 0) {
-                if hasTranslations || hasRomanization {
+                if (hasTranslations || hasRomanization) && !(isFullScreen && isFullScreenControlsHidden) {
                     HStack(spacing: 8) {
                         if hasRomanization {
                             Toggle(isOn: $viewModel.isRomanizationEnabled) {
@@ -1052,102 +1064,151 @@ struct ContentView: View {
     }
 
     private var fullScreenNowPlayingView: some View {
-        VStack(spacing: 20) {
-            // Header with dismiss button and title
-            HStack {
-                Button {
-                    withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
-                        isFullScreenNowPlaying = false
-                    }
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(12)
-                        .background(.white.opacity(0.12), in: Circle())
-                }
-                .buttonStyle(.plain)
-
-                Spacer()
-
-                Text("Now Playing")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.8))
-
-                Spacer()
-
-                Color.clear
-                    .frame(width: 44, height: 44)
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 16)
-
-            if viewModel.selectedTrackID != nil && viewModel.lines.isEmpty && !viewModel.isLoadingLyrics {
-                Spacer()
-
-                VStack(spacing: 28) {
-                    dynamicArtworkView(size: isMac ? 340 : 280)
-                        .shadow(color: .black.opacity(0.35), radius: 20, x: 0, y: 12)
-
-                    VStack(spacing: 8) {
-                        MarqueeText(
-                            text: viewModel.nowPlayingTitle,
-                            font: .system(size: isMac ? 32 : 26, weight: .bold),
-                            color: .white,
-                            alignment: .center
-                        )
-                        .padding(.horizontal, 32)
-
-                        MarqueeText(
-                            text: viewModel.authorMetadata,
-                            font: .system(size: isMac ? 19 : 16, weight: .semibold),
-                            color: .white.opacity(0.6),
-                            alignment: .center
-                        )
-                        .padding(.horizontal, 32)
+        ZStack {
+            Color.black.opacity(0.001)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        isFullScreenControlsHidden.toggle()
                     }
                 }
-                .frame(maxWidth: .infinity)
 
-                Spacer()
+            VStack(spacing: isFullScreenControlsHidden ? 12 : 20) {
+                // Header with dismiss button and title
+                if !isFullScreenControlsHidden {
+                    HStack {
+                        Button {
+                            withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
+                                isFullScreenNowPlaying = false
+                                isFullScreenControlsHidden = false
+                            }
+                        } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(12)
+                                .background(.white.opacity(0.12), in: Circle())
+                        }
+                        .buttonStyle(.plain)
 
-                VStack(spacing: 24) {
+                        Spacer()
+
+                        Text("Now Playing")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.8))
+
+                        Spacer()
+
+                        Color.clear
+                            .frame(width: 44, height: 44)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.top, 16)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                            isFullScreenControlsHidden.toggle()
+                        }
+                    }
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .top)),
+                        removal: .opacity.combined(with: .move(edge: .top))
+                    ))
+                }
+
+                if viewModel.selectedTrackID != nil && viewModel.lines.isEmpty && !viewModel.isLoadingLyrics {
+                    Spacer()
+
+                    VStack(spacing: 28) {
+                        dynamicArtworkView(size: isMac ? 340 : 280)
+                            .shadow(color: .black.opacity(0.35), radius: 20, x: 0, y: 12)
+
+                        VStack(spacing: 8) {
+                            MarqueeText(
+                                text: viewModel.nowPlayingTitle,
+                                font: .system(size: isMac ? 32 : 26, weight: .bold),
+                                color: .white,
+                                alignment: .center
+                            )
+                            .padding(.horizontal, 32)
+
+                            MarqueeText(
+                                text: viewModel.authorMetadata,
+                                font: .system(size: isMac ? 19 : 16, weight: .semibold),
+                                color: .white.opacity(0.6),
+                                alignment: .center
+                            )
+                            .padding(.horizontal, 32)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                            isFullScreenControlsHidden.toggle()
+                        }
+                    }
+
+                    Spacer()
+
+                    VStack(spacing: 24) {
+                        timelineSeekBar
+                        if !isFullScreenControlsHidden {
+                            controls
+                                .transition(.asymmetric(
+                                    insertion: .opacity.combined(with: .move(edge: .bottom)),
+                                    removal: .opacity.combined(with: .move(edge: .bottom))
+                                ))
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, isFullScreenControlsHidden ? 32 : 36)
+                } else {
+                    HStack(spacing: 20) {
+                        largeArtworkView
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            MarqueeText(
+                                text: viewModel.nowPlayingTitle,
+                                font: .system(size: 24, weight: .bold),
+                                color: .white
+                            )
+
+                            MarqueeText(
+                                text: viewModel.authorMetadata,
+                                font: .system(size: 15, weight: .medium),
+                                color: .white.opacity(0.6)
+                            )
+                        }
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, isFullScreenControlsHidden ? 16 : 0)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                            isFullScreenControlsHidden.toggle()
+                        }
+                    }
+
+                    lyricsPanel(isFullScreen: true)
+
                     timelineSeekBar
-                    controls
-                }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 36)
-            } else {
-                HStack(spacing: 20) {
-                    largeArtworkView
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, isFullScreenControlsHidden ? 30 : 0)
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        MarqueeText(
-                            text: viewModel.nowPlayingTitle,
-                            font: .system(size: 24, weight: .bold),
-                            color: .white
-                        )
-
-                        MarqueeText(
-                            text: viewModel.authorMetadata,
-                            font: .system(size: 15, weight: .medium),
-                            color: .white.opacity(0.6)
-                        )
+                    if !isFullScreenControlsHidden {
+                        controls
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, 24)
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .bottom)),
+                                removal: .opacity.combined(with: .move(edge: .bottom))
+                            ))
                     }
-                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-
-                    Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 20)
-
-                lyricsPanel(isFullScreen: true)
-
-                timelineSeekBar
-                    .padding(.horizontal, 20)
-
-                controls
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 24)
             }
         }
     }

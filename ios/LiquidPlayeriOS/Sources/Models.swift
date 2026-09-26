@@ -85,7 +85,7 @@ struct LyricLine: Identifiable, Hashable {
         words: [LyricWord] = [],
         startMs: Int,
         lineEndMs: Int? = nil,
-        isWordSynced: Bool = true,
+        isWordSynced: Bool = false,
         agent: String? = nil,
         isBackground: Bool = false,
         oppositeAligned: Bool = false,
@@ -175,6 +175,13 @@ struct ParsedLyrics {
         self.songwriters = songwriters
         self.source = source
         self.attribution = attribution
+    }
+
+    var hasWordSyncedLyrics: Bool {
+        let wordSyncedLines = lines.filter {
+            $0.isWordSynced && $0.words.count > 1 && !$0.isInterlude && !$0.isSongwriter
+        }
+        return wordSyncedLines.count >= 2
     }
 }
 

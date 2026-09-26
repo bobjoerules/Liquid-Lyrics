@@ -209,7 +209,7 @@ final class PlayerViewModel: ObservableObject {
             if let cached = lyricsCache[trackId] {
                 self.lines = cached.lines
                 self.isLoadingLyrics = false
-                self.lyricsStatus = cached.lines.isEmpty ? "" : "Synced with Spicy Lyrics"
+                self.lyricsStatus = cached.lines.isEmpty ? "" : (cached.source ?? (cached.hasWordSyncedLyrics ? "Synced with Spicy Lyrics" : "Line Synced with Spicy Lyrics"))
                 self.lyricsSource = cached.source
                 self.lyricsAttribution = cached.attribution
                 self.lyricsSongwriters = cached.songwriters
@@ -233,7 +233,7 @@ final class PlayerViewModel: ObservableObject {
         if let cached = lyricsCache[trackId] {
             self.lines = cached.lines
             self.isLoadingLyrics = false
-            self.lyricsStatus = cached.lines.isEmpty ? "" : "Synced with Spicy Lyrics"
+            self.lyricsStatus = cached.lines.isEmpty ? "" : (cached.source ?? (cached.hasWordSyncedLyrics ? "Synced with Spicy Lyrics" : "Line Synced with Spicy Lyrics"))
             self.lyricsSource = cached.source
             self.lyricsAttribution = cached.attribution
             self.lyricsSongwriters = cached.songwriters
@@ -249,7 +249,7 @@ final class PlayerViewModel: ObservableObject {
             self.lyricsCache[trackId] = parsed
             self.lines = parsed.lines
             self.isLoadingLyrics = false
-            self.lyricsStatus = "Loaded from Saved TTML"
+            self.lyricsStatus = parsed.hasWordSyncedLyrics ? "Loaded from Saved TTML" : "Line Synced with Saved TTML"
             self.lyricsSource = parsed.source ?? "Spicy Lyrics (Saved)"
             self.lyricsAttribution = parsed.attribution
             self.lyricsSongwriters = parsed.songwriters
@@ -258,34 +258,35 @@ final class PlayerViewModel: ObservableObject {
         }
 
         isLoadingLyrics = true
-        lyricsStatus = "Fetching synced lyrics from Spicy Lyrics..."
+        lyricsStatus = "Fetching synced lyrics..."
         errorMessage = nil
 
         do {
             let parsed = try await SpicyLyricsService.shared.fetchLyrics(for: trackId)
-            self.lyricsCache[trackId] = parsed
-            self.lines = parsed.lines
-            self.isLoadingLyrics = false
-            self.lyricsStatus = parsed.lines.isEmpty ? "" : "Synced with Spicy Lyrics"
-            self.lyricsSource = parsed.source
-            self.lyricsAttribution = parsed.attribution
-            self.lyricsSongwriters = parsed.songwriters
-            self.authorMetadata = nowPlayingArtist
-            if parsed.lines.isEmpty {
-                LibraryManager.shared.markNoLyrics(for: trackId)
-            } else {
+            if !parsed.lines.isEmpty {
+                self.lyricsCache[trackId] = parsed
+                self.lines = parsed.lines
+                self.isLoadingLyrics = false
+                self.lyricsStatus = parsed.hasWordSyncedLyrics ? "Synced with Spicy Lyrics" : "Line Synced with Spicy Lyrics"
+                self.lyricsSource = parsed.source
+                self.lyricsAttribution = parsed.attribution
+                self.lyricsSongwriters = parsed.songwriters
+                self.authorMetadata = nowPlayingArtist
                 LibraryManager.shared.saveLyrics(for: trackId, parsed: parsed)
+                return
             }
         } catch {
-            self.isLoadingLyrics = false
-            self.lyricsStatus = ""
-            self.lines = []
-            self.lyricsSource = nil
-            self.lyricsAttribution = nil
-            self.lyricsSongwriters = []
-            self.authorMetadata = nowPlayingArtist
-            LibraryManager.shared.markNoLyrics(for: trackId)
+            // Spicy Lyrics request failed
         }
+
+        self.isLoadingLyrics = false
+        self.lyricsStatus = ""
+        self.lines = []
+        self.lyricsSource = nil
+        self.lyricsAttribution = nil
+        self.lyricsSongwriters = []
+        self.authorMetadata = nowPlayingArtist
+        LibraryManager.shared.markNoLyrics(for: trackId)
     }
 
     func playLibrarySong(_ song: LibrarySong) {

@@ -23,6 +23,7 @@ private final class ParserDelegate: NSObject, XMLParserDelegate {
     struct SpanContext {
         let begin: Int?
         let end: Int?
+        let hasExplicitTiming: Bool
         let isBackground: Bool
         let isTranslation: Bool
         let isRoman: Bool
@@ -118,6 +119,31 @@ private final class ParserDelegate: NSObject, XMLParserDelegate {
         allLines.append(contentsOf: interludes)
         allLines.sort { $0.startMs < $1.startMs }
 
+        // Final verification: if fewer than 2 lines have word sync in the entire song (and song has >= 2 lines),
+        // treat the whole song as line-synced to prevent false karaoke animation.
+        let nonSpecialLines = allLines.filter { !$0.isSongwriter && !$0.isInterlude }
+        let wordSyncedCount = nonSpecialLines.filter { $0.isWordSynced && !$0.words.isEmpty }.count
+        if wordSyncedCount < 2 && nonSpecialLines.count >= 2 {
+            allLines = allLines.map { line in
+                if line.isSongwriter || line.isInterlude { return line }
+                return LyricLine(
+                    words: [],
+                    startMs: line.startMs,
+                    lineEndMs: line.endMs,
+                    isWordSynced: false,
+                    agent: line.agent,
+                    isBackground: line.isBackground,
+                    oppositeAligned: line.oppositeAligned,
+                    isSongwriter: false,
+                    isInterlude: false,
+                    interludeEndMs: -1,
+                    translation: line.translation,
+                    romanization: line.romanization,
+                    rawText: line.displayText
+                )
+            }
+        }
+
         return ParsedLyrics(lines: allLines, songwriters: songwriters)
     }
 
@@ -210,14 +236,20 @@ private struct ParagraphState {
     let agent: String?
     let defaultAgent: String?
 
-    private(set) var leadLines: [[LyricWord]] = [[]]
-    private(set) var backgroundGroups: [[LyricWord]] = []
-    private(set) var currentTranslation = ""
-    private(set) var currentRomanization = ""
+    struct LineDraft {
+        var words: [LyricWord] = []
+        var rawText: String = ""
+        var hasExplicitWordTiming: Bool = false
+    }
+
+    private var leadLines: [LineDraft] = [LineDraft()]
+    private var backgroundGroups: [LineDraft] = []
+    private var currentBackgroundDraft: LineDraft?
+    private var inBackgroundSpan = false
+    private var currentTranslation = ""
+    private var currentRomanization = ""
     private var stack: [ParserDelegate.SpanContext]
     private var previousEndedMidWord = false
-    private var currentBackgroundGroup: [LyricWord]?
-    private var inBackgroundSpan = false
     private var backgroundPreviousEndedMidWord = false
     private var pendingText = ""
 
@@ -226,12 +258,13 @@ private struct ParagraphState {
         self.endMs = endMs
         self.agent = agent
         self.defaultAgent = defaultAgent
-        self.stack = [ParserDelegate.SpanContext(begin: beginMs, end: endMs, isBackground: false, isTranslation: false, isRoman: false)]
+        self.stack = [ParserDelegate.SpanContext(begin: beginMs, end: endMs, hasExplicitTiming: false, isBackground: false, isTranslation: false, isRoman: false)]
     }
 
     mutating func pushSpan(attributes: [String: String]) {
         flushPendingText()
-        let inherited = stack.last ?? ParserDelegate.SpanContext(begin: beginMs, end: endMs, isBackground: false, isTranslation: false, isRoman: false)
+        let inherited = stack.last ?? ParserDelegate.SpanContext(begin: beginMs, end: endMs, hasExplicitTiming: false, isBackground: false, isTranslation: false, isRoman: false)
+        let hasExplicitTiming = (attributes["begin"] != nil)
         let begin = parseTimeMs(attributes["begin"]) ?? inherited.begin
         let end = parseTimeMs(attributes["end"]) ?? inherited.end
         let role = attributes["role"] ?? attributes["ttm:role"]
@@ -239,13 +272,13 @@ private struct ParagraphState {
         let isTranslation = role == "x-translation" || inherited.isTranslation
         let isRoman = role == "x-roman" || inherited.isRoman
 
-        if isBackground && currentBackgroundGroup == nil {
-            currentBackgroundGroup = []
+        if isBackground && currentBackgroundDraft == nil {
+            currentBackgroundDraft = LineDraft()
             backgroundPreviousEndedMidWord = false
         }
 
         inBackgroundSpan = isBackground
-        stack.append(ParserDelegate.SpanContext(begin: begin, end: end, isBackground: isBackground, isTranslation: isTranslation, isRoman: isRoman))
+        stack.append(ParserDelegate.SpanContext(begin: begin, end: end, hasExplicitTiming: hasExplicitTiming, isBackground: isBackground, isTranslation: isTranslation, isRoman: isRoman))
     }
 
     mutating func popSpan() {
@@ -257,10 +290,10 @@ private struct ParagraphState {
         let popped = stack.removeLast()
         let nextIsBackground = stack.last?.isBackground ?? false
         if popped.isBackground && !nextIsBackground {
-            if let currentBackgroundGroup, !currentBackgroundGroup.isEmpty {
-                backgroundGroups.append(currentBackgroundGroup)
+            if let currentBackgroundDraft, (!currentBackgroundDraft.words.isEmpty || !currentBackgroundDraft.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                backgroundGroups.append(currentBackgroundDraft)
             }
-            self.currentBackgroundGroup = nil
+            self.currentBackgroundDraft = nil
             inBackgroundSpan = false
         } else {
             inBackgroundSpan = nextIsBackground
@@ -271,16 +304,16 @@ private struct ParagraphState {
         flushPendingText()
 
         if inBackgroundSpan {
-            if let currentBackgroundGroup, !currentBackgroundGroup.isEmpty {
-                backgroundGroups.append(currentBackgroundGroup)
-                self.currentBackgroundGroup = []
+            if let currentBackgroundDraft, (!currentBackgroundDraft.words.isEmpty || !currentBackgroundDraft.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                backgroundGroups.append(currentBackgroundDraft)
+                self.currentBackgroundDraft = LineDraft()
             }
             backgroundPreviousEndedMidWord = false
             return
         }
 
-        if let currentLine = leadLines.last, !currentLine.isEmpty {
-            leadLines.append([])
+        if let currentLine = leadLines.last, (!currentLine.words.isEmpty || !currentLine.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+            leadLines.append(LineDraft())
         }
         previousEndedMidWord = false
     }
@@ -293,7 +326,7 @@ private struct ParagraphState {
         let rawText = pendingText
         pendingText = ""
 
-        let context = stack.last ?? ParserDelegate.SpanContext(begin: beginMs, end: endMs, isBackground: false, isTranslation: false, isRoman: false)
+        let context = stack.last ?? ParserDelegate.SpanContext(begin: beginMs, end: endMs, hasExplicitTiming: false, isBackground: false, isTranslation: false, isRoman: false)
         let isBackgroundToken = context.isBackground || inBackgroundSpan
 
         if context.isTranslation {
@@ -318,7 +351,31 @@ private struct ParagraphState {
             return
         }
 
+        if rawText.isEmpty {
+            return
+        }
+
+        // Always accumulate raw text into the current line draft
+        if isBackgroundToken {
+            if currentBackgroundDraft == nil {
+                currentBackgroundDraft = LineDraft()
+            }
+            currentBackgroundDraft?.rawText.append(rawText)
+        } else {
+            if leadLines.isEmpty {
+                leadLines = [LineDraft()]
+            }
+            leadLines[leadLines.count - 1].rawText.append(rawText)
+        }
+
         if rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return
+        }
+
+        // CRITICAL: Only construct LyricWord instances if this span has EXPLICIT timing.
+        // If the span or paragraph does not have word-level timestamps, do NOT fake words
+        // by dividing paragraph duration by word count.
+        guard context.hasExplicitTiming else {
             return
         }
 
@@ -399,12 +456,11 @@ private struct ParagraphState {
             )
 
             if isBackgroundToken {
-                currentBackgroundGroup?.append(word)
+                currentBackgroundDraft?.words.append(word)
+                currentBackgroundDraft?.hasExplicitWordTiming = true
             } else {
-                if leadLines.isEmpty {
-                    leadLines = [[]]
-                }
-                leadLines[leadLines.count - 1].append(word)
+                leadLines[leadLines.count - 1].words.append(word)
+                leadLines[leadLines.count - 1].hasExplicitWordTiming = true
             }
         }
 
@@ -419,14 +475,28 @@ private struct ParagraphState {
         let oppositeAligned = agent != nil && defaultAgent != nil && agent != defaultAgent
         var result: [LyricLine] = []
 
-        for words in leadLines where !words.isEmpty {
-            let hasWordTimings = words.count > 1 && Set(words.map(\.startMs)).count > 1
+        for draft in leadLines {
+            let trimmedRaw = draft.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if draft.words.isEmpty && trimmedRaw.isEmpty {
+                continue
+            }
+
+            let words = draft.words
+            let durations = words.map { $0.endMs - $0.startMs }
+            let isArtificialDivision = words.count >= 3 && Set(durations).count == 1
+            let distinctStarts = words.count > 1 ? Set(words.map(\.startMs)).count > 1 : true
+            let isWordSynced = draft.hasExplicitWordTiming && !words.isEmpty && distinctStarts && !isArtificialDivision
+
+            let effectiveRawText = !trimmedRaw.isEmpty ? trimmedRaw : words.map(\.text).joined(separator: " ")
+            let lineStart = isWordSynced ? (words.first?.startMs ?? beginMs) : beginMs
+            let lineEnd = isWordSynced ? (words.last?.endMs ?? endMs) : endMs
+
             result.append(
                 LyricLine(
-                    words: words,
-                    startMs: words.first?.startMs ?? beginMs,
-                    lineEndMs: endMs,
-                    isWordSynced: hasWordTimings,
+                    words: isWordSynced ? words : [],
+                    startMs: lineStart,
+                    lineEndMs: lineEnd,
+                    isWordSynced: isWordSynced,
                     agent: agent,
                     isBackground: false,
                     oppositeAligned: oppositeAligned,
@@ -434,21 +504,42 @@ private struct ParagraphState {
                     isInterlude: false,
                     interludeEndMs: -1,
                     translation: currentTranslation.isEmpty ? nil : currentTranslation,
-                    romanization: currentRomanization.isEmpty ? nil : currentRomanization
+                    romanization: currentRomanization.isEmpty ? nil : currentRomanization,
+                    rawText: effectiveRawText
                 )
             )
         }
 
-        for group in backgroundGroups {
-            let groupStart = group.first?.startMs ?? beginMs
-            let groupEnd = group.last?.endMs ?? endMs
-            let hasWordTimings = group.count > 1 ? Set(group.map(\.startMs)).count > 1 : true
+        var allBgGroups = backgroundGroups
+        if let current = currentBackgroundDraft, (!current.words.isEmpty || !current.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+            allBgGroups.append(current)
+        }
+
+        for draft in allBgGroups {
+            var trimmedRaw = draft.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedRaw.hasPrefix("(") && trimmedRaw.hasSuffix(")") {
+                trimmedRaw = String(trimmedRaw.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if draft.words.isEmpty && trimmedRaw.isEmpty {
+                continue
+            }
+
+            let words = draft.words
+            let durations = words.map { $0.endMs - $0.startMs }
+            let isArtificialDivision = words.count >= 3 && Set(durations).count == 1
+            let distinctStarts = words.count > 1 ? Set(words.map(\.startMs)).count > 1 : true
+            let isWordSynced = draft.hasExplicitWordTiming && !words.isEmpty && distinctStarts && !isArtificialDivision
+
+            let effectiveRawText = !trimmedRaw.isEmpty ? trimmedRaw : words.map(\.text).joined(separator: " ")
+            let groupStart = isWordSynced ? (words.first?.startMs ?? beginMs) : beginMs
+            let groupEnd = isWordSynced ? (words.last?.endMs ?? endMs) : endMs
+
             result.append(
                 LyricLine(
-                    words: group,
+                    words: isWordSynced ? words : [],
                     startMs: groupStart,
                     lineEndMs: groupEnd,
-                    isWordSynced: hasWordTimings,
+                    isWordSynced: isWordSynced,
                     agent: agent,
                     isBackground: true,
                     oppositeAligned: oppositeAligned,
@@ -456,7 +547,8 @@ private struct ParagraphState {
                     isInterlude: false,
                     interludeEndMs: -1,
                     translation: nil,
-                    romanization: nil
+                    romanization: nil,
+                    rawText: effectiveRawText
                 )
             )
         }

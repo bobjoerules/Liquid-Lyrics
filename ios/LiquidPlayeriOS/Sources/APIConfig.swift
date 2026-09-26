@@ -5,7 +5,6 @@ enum APIConfig {
     private static let spotifyClientIdKey = "LiquidPlayer.spotifyClientId"
     private static let spotifyClientSecretKey = "LiquidPlayer.spotifyClientSecret"
     private static let spotifyRedirectUriKey = "LiquidPlayer.spotifyRedirectUri"
-
     // Default keys (Client key for Liquid Player; sensitive secrets kept empty)
     static let defaultSpicyLyricsApiKey = "sl_pk_pz-RiyRc7h3awnFVd-DybA9ulbh3-vSBxzzojOerWwM"
     static let defaultSpotifyClientId = "22c28b6eda464ae89cd44842e6e9e070"

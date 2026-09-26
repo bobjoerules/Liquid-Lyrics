@@ -191,16 +191,24 @@ actor SpicyLyricsService {
         let songwriters = body.SongWriters ?? []
         var lines: [LyricLine] = []
 
-        let syncType = body.type ?? "Syllable"
+        let isSongLineSynced = (body.type?.caseInsensitiveCompare("Line") == .orderedSame) ||
+                               (body.type?.caseInsensitiveCompare("Static") == .orderedSame)
 
         if let contentLines = body.Content {
             for contentLine in contentLines {
-                if syncType == "Line" || contentLine.Lead == nil {
+                let isContentLineSynced = isSongLineSynced ||
+                                          (contentLine.type?.caseInsensitiveCompare("Line") == .orderedSame) ||
+                                          (contentLine.Lead == nil) ||
+                                          (contentLine.Lead?.Syllables == nil) ||
+                                          (contentLine.Lead?.Syllables?.isEmpty == true)
+
+                if isContentLineSynced {
                     // Line-level: show line directly without fake word timings
-                    let text = contentLine.Text ?? ""
-                    let startMs = Int((contentLine.StartTime ?? 0.0) * 1000.0)
-                    let endMs = Int((contentLine.EndTime ?? (Double(startMs) / 1000.0 + 3.0)) * 1000.0)
-                    let opposite = contentLine.OppositeAligned ?? (contentLine.agent != nil && contentLine.agent != "1" && contentLine.agent != "v1")
+                    let rawContentText = contentLine.Text ?? contentLine.Lead?.Syllables?.map(\.Text).joined(separator: " ") ?? ""
+                    let text = rawContentText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let startMs = Int((contentLine.StartTime ?? contentLine.Lead?.StartTime ?? 0.0) * 1000.0)
+                    let endMs = Int((contentLine.EndTime ?? contentLine.Lead?.EndTime ?? (Double(startMs) / 1000.0 + 3.0)) * 1000.0)
+                    let opposite = contentLine.OppositeAligned ?? contentLine.Lead?.OppositeAligned ?? (contentLine.agent != nil && contentLine.agent != "1" && contentLine.agent != "v1")
 
                     lines.append(
                         LyricLine(
@@ -214,70 +222,84 @@ actor SpicyLyricsService {
                             isSongwriter: false,
                             isInterlude: false,
                             interludeEndMs: -1,
-                            translation: contentLine.TranslatedText,
-                            romanization: contentLine.TransliteratedText,
+                            translation: contentLine.TranslatedText ?? contentLine.Lead?.TranslatedText,
+                            romanization: contentLine.TransliteratedText ?? contentLine.Lead?.TransliteratedText,
                             rawText: text
                         )
                     )
                 } else if let lead = contentLine.Lead {
-                    // Syllable-level precision
                     let opposite = contentLine.OppositeAligned ?? contentLine.Lead?.OppositeAligned ?? (contentLine.agent != nil && contentLine.agent != "1" && contentLine.agent != "v1")
                     let startMs = Int((lead.StartTime ?? 0.0) * 1000.0)
-                    
-                    var words: [LyricWord] = []
-                    if let syllables = lead.Syllables {
-                        for (sylIndex, syl) in syllables.enumerated() {
-                            let sylStart = Int(syl.StartTime * 1000.0)
-                            let sylEnd = Int(syl.EndTime * 1000.0)
-                            let rawToken = syl.Text
-                            let trimmedToken = rawToken.trimmingCharacters(in: .whitespaces)
-                            guard !trimmedToken.isEmpty else { continue }
+                    let endMs = Int((lead.EndTime ?? Double(startMs) / 1000.0 + 3.0) * 1000.0)
+                    let rawSyllables = lead.Syllables ?? []
 
-                            let hasLeadingSpace = rawToken.hasPrefix(" ")
-                            let isPart = (syl.IsPartOfWord ?? false) && !hasLeadingSpace
-                            let duration = max(sylEnd - sylStart, 1)
+                    var candidateWords: [LyricWord] = []
+                    for syl in rawSyllables {
+                        let sylStart = Int(syl.StartTime * 1000.0)
+                        let sylEnd = Int(syl.EndTime * 1000.0)
+                        let rawToken = syl.Text
+                        let trimmedToken = rawToken.trimmingCharacters(in: .whitespaces)
+                        guard !trimmedToken.isEmpty else { continue }
 
-                            let isLetterGroup = duration >= 1000 && trimmedToken.count > 1
-                            let letters: [LyricLetter]
-                            if isLetterGroup {
-                                let count = max(trimmedToken.count, 1)
-                                let letterDur = Double(duration) / Double(count)
-                                letters = trimmedToken.enumerated().map { off, char in
-                                    LyricLetter(
-                                        char: String(char),
-                                        startMs: sylStart + Int(Double(off) * letterDur),
-                                        endMs: off == count - 1 ? sylEnd : sylStart + Int(Double(off + 1) * letterDur)
-                                    )
-                                }
-                            } else {
-                                letters = []
-                            }
+                        let hasLeadingSpace = rawToken.hasPrefix(" ")
+                        let isPart = (syl.IsPartOfWord ?? false) && !hasLeadingSpace
+                        let duration = max(sylEnd - sylStart, 1)
 
-                            words.append(
-                                LyricWord(
-                                    text: trimmedToken,
-                                    startMs: sylStart,
-                                    endMs: sylEnd,
-                                    isPartOfWord: isPart,
-                                    isLetterGroup: isLetterGroup,
-                                    letters: letters
+                        // Only genuine single syllables without spaces held over 1.2s should animate letter groups
+                        let isLetterGroup = duration >= 1200 && trimmedToken.count > 1 && !trimmedToken.contains(" ")
+                        let letters: [LyricLetter]
+                        if isLetterGroup {
+                            let count = max(trimmedToken.count, 1)
+                            let letterDur = Double(duration) / Double(count)
+                            letters = trimmedToken.enumerated().map { off, char in
+                                LyricLetter(
+                                    char: String(char),
+                                    startMs: sylStart + Int(Double(off) * letterDur),
+                                    endMs: off == count - 1 ? sylEnd : sylStart + Int(Double(off + 1) * letterDur)
                                 )
-                            )
+                            }
+                        } else {
+                            letters = []
                         }
+
+                        candidateWords.append(
+                            LyricWord(
+                                text: trimmedToken,
+                                startMs: sylStart,
+                                endMs: sylEnd,
+                                isPartOfWord: isPart,
+                                isLetterGroup: isLetterGroup,
+                                letters: letters
+                            )
+                        )
                     }
+
+                    // A line is ONLY word-synced if it has multiple tokens with distinct start times
+                    // and non-identical durations (not artificially divided)
+                    let hasMultiTokens = candidateWords.count > 1
+                    let distinctStarts = Set(candidateWords.map(\.startMs)).count > 1
+                    let durations = candidateWords.map { $0.endMs - $0.startMs }
+                    let isIdenticalDurations = candidateWords.count >= 3 && Set(durations).count == 1
+                    let isTrulyWordSynced = !isSongLineSynced && hasMultiTokens && distinctStarts && !isIdenticalDurations
+
+                    let lineText = contentLine.Text ?? candidateWords.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let actualEnd = candidateWords.last?.endMs ?? endMs
 
                     lines.append(
                         LyricLine(
-                            words: words,
+                            words: isTrulyWordSynced ? candidateWords : [],
                             startMs: startMs,
+                            lineEndMs: actualEnd,
+                            isWordSynced: isTrulyWordSynced,
                             agent: nil,
                             isBackground: false,
                             oppositeAligned: opposite,
                             isSongwriter: false,
                             isInterlude: false,
                             interludeEndMs: -1,
-                            translation: lead.TranslatedText,
-                            romanization: lead.TransliteratedText
+                            translation: lead.TranslatedText ?? contentLine.TranslatedText,
+                            romanization: lead.TransliteratedText ?? contentLine.TransliteratedText,
+                            rawText: isTrulyWordSynced ? nil : lineText
                         )
                     )
 
@@ -287,7 +309,7 @@ actor SpicyLyricsService {
                             let bgStart = Int((bg.StartTime ?? Double(startMs) / 1000.0) * 1000.0)
                             var bgWords: [LyricWord] = []
                             if let bgSyllables = bg.Syllables {
-                                for (sylIndex, syl) in bgSyllables.enumerated() {
+                                for syl in bgSyllables {
                                     let sStart = Int(syl.StartTime * 1000.0)
                                     let sEnd = Int(syl.EndTime * 1000.0)
                                     let rawToken = syl.Text
@@ -310,10 +332,13 @@ actor SpicyLyricsService {
                             if !bgWords.isEmpty {
                                 let actualStart = bgWords.first?.startMs ?? bgStart
                                 let actualEnd = bg.EndTime.map { Int($0 * 1000.0) } ?? bgWords.last?.endMs ?? actualStart
-                                let hasWordTimings = bgWords.count > 1 ? Set(bgWords.map(\.startMs)).count > 1 : true
+                                let bgDurations = bgWords.map { $0.endMs - $0.startMs }
+                                let bgIdentical = bgWords.count >= 3 && Set(bgDurations).count == 1
+                                let hasWordTimings = !isSongLineSynced && bgWords.count > 1 && Set(bgWords.map(\.startMs)).count > 1 && !bgIdentical
+                                let bgText = bgWords.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
                                 lines.append(
                                     LyricLine(
-                                        words: bgWords,
+                                        words: hasWordTimings ? bgWords : [],
                                         startMs: actualStart,
                                         lineEndMs: actualEnd,
                                         isWordSynced: hasWordTimings,
@@ -324,13 +349,38 @@ actor SpicyLyricsService {
                                         isInterlude: false,
                                         interludeEndMs: -1,
                                         translation: bg.TranslatedText,
-                                        romanization: bg.TransliteratedText
+                                        romanization: bg.TransliteratedText,
+                                        rawText: hasWordTimings ? nil : bgText
                                     )
                                 )
                             }
                         }
                     }
                 }
+            }
+        }
+
+        // Whole-song verification: If fewer than 2 lines have genuine word timings,
+        // then the entire song is line-synced! Ensure all lines are clean whole lines.
+        let wordSyncedLineCount = lines.filter { $0.isWordSynced && !$0.words.isEmpty && !$0.isInterlude && !$0.isSongwriter }.count
+        if wordSyncedLineCount < 2 {
+            lines = lines.map { line in
+                if line.isInterlude || line.isSongwriter { return line }
+                return LyricLine(
+                    words: [],
+                    startMs: line.startMs,
+                    lineEndMs: line.endMs,
+                    isWordSynced: false,
+                    agent: line.agent,
+                    isBackground: line.isBackground,
+                    oppositeAligned: line.oppositeAligned,
+                    isSongwriter: false,
+                    isInterlude: false,
+                    interludeEndMs: -1,
+                    translation: line.translation,
+                    romanization: line.romanization,
+                    rawText: line.displayText
+                )
             }
         }
 

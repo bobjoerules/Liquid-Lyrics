@@ -1,6 +1,6 @@
-# Liquid Lyrics
+# Liquid Player
 
-Liquid Lyrics is a synchronized lyrics companion for iOS, powered by the **Spotify Web API** and the **[Spicy Lyrics API](https://developers.spicylyrics.org/docs)**. Built using **SwiftUI**, Liquid Lyrics connects to Spotify to track real-time playback and render live, syllable-synced bouncing lyrics with smooth physics animations.
+Liquid Player is a synchronized lyrics and music player companion for iOS, powered by the **Spotify Web API** and the **[Spicy Lyrics API](https://developers.spicylyrics.org/docs)**. Built using **SwiftUI**, Liquid Player connects to Spotify to track real-time playback and render live, syllable-synced bouncing lyrics with smooth physics animations.
 
 ---
 
@@ -16,7 +16,7 @@ Liquid Lyrics is a synchronized lyrics companion for iOS, powered by the **Spoti
 
 ### Live Spotify Integration
 - **Live Playback Sync**: Connects to the Spotify Web API to sync currently playing song, artist, album art, progress, and duration.
-- **Full Remote Controls**: Play, Pause, Next, Previous, Seek slider, and Shuffle directly from Liquid Lyrics.
+- **Full Remote Controls**: Play, Pause, Next, Previous, Seek slider, and Shuffle directly from Liquid Player.
 - **Micro-Interpolation**: High-resolution timer interpolates playback progress between Spotify poll events for 60/120fps ultra-fluid lyric animations.
 
 ### iOS
